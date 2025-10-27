@@ -1,35 +1,35 @@
-// 在庫管理PWA フロントエンド実装（プレーンJS）
-// - Service Worker登録
-// - APIラッパ
+// 在庫管理 PWA フロントエンド
+// - Service Worker 登録
+// - API ラッパー
 // - 画面タブ切替
 // - /items 取得、一覧と不足描画
-// - 在庫更新（−/＋/直入力）→ /stock/update → 再読込
-// - Badging APIで不足件数表示（対応環境のみ）
-// - ネットエラーはalert
+// - 在庫更新（ボタン/直接入力）→ /stock/update（入力中は安全に再描画）
+// - Badging API で不足件数表示
+// - ネットエラーは alert
 
 (() => {
   'use strict';
 
-  // APIベースURL（env.jsで設定）
+  // API ベース URL（env.js で設定）
   const API_BASE = (typeof GAS_API_BASE === 'string') ? GAS_API_BASE : '';
   if (!API_BASE) {
     console.warn('GAS_API_BASE が未設定です。env.js を編集してください。');
   }
 
   // グローバル状態
-  let allItems = []; // シート Items の全件
+  let allItems = []; // Items の全件
   let shortages = []; // 不足アイテム
 
   // PWA: Service Worker 登録
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(err => {
-        console.warn('Service Worker 登録失敗:', err);
+        console.warn('Service Worker 登録失敗', err);
       });
     });
   }
 
-  // APIラッパ
+  // API ラッパー
   async function api(path, { method = 'GET', body = undefined, query = undefined } = {}) {
     if (!API_BASE) throw new Error('GAS_API_BASE 未設定');
     const params = new URLSearchParams();
@@ -38,9 +38,8 @@
       for (const [k, v] of Object.entries(query)) params.set(k, String(v));
     }
     const url = `${API_BASE}?${params.toString()}`;
-    // 注意: GAS WebアプリへクロスオリジンPOST時、"application/json" を付けると
-    // ブラウザが事前検査(Preflight)を行い失敗することがあるため付けません。
-    // 代わりに素のテキストとしてJSON文字列を送ります（サーバ側はJSON.parseで対応）。
+    // 注意: GAS Webアプリへのクロスオリジン POST で Content-Type: application/json を付けると
+    // Preflight で失敗する場合があるため、素のテキストで JSON を送る
     const init = { method };
     if (body != null) init.body = JSON.stringify(body);
     const res = await fetch(url, init);
@@ -57,6 +56,26 @@
     return (Math.round(Number(n) * 100) / 100).toFixed(2);
   }
 
+  // 文字化け対策: ヘッダー名の候補から拾う
+  function firstField(obj, keys) {
+    for (const k of keys) {
+      if (obj != null && obj[k] != null && obj[k] !== '') return obj[k];
+    }
+    return undefined;
+  }
+
+  function readFields(it) {
+    // 正常な日本語ヘッダー + 一部で見かけた化けヘッダー候補
+    const id = Number(it['ID'] ?? it['Id'] ?? it['id']);
+    const name = firstField(it, ['商品名', '啁E��吁E']) || '';
+    const unit = firstField(it, ['単位', '単佁E']) || '';
+    const cur = Number(firstField(it, ['現在庫数'])) || 0;
+    const min = Number(firstField(it, ['最低在庫数'])) || 0;
+    const category = firstField(it, ['カテゴリー', 'カテゴリ', 'カチE��リ']) || '';
+    const soloel = firstField(it, ['ソロエルURL（任意）', 'ソロエルURL', 'ソロエルURL�E�任意！E']) || '';
+    return { id, name, unit, cur, min, category, soloel };
+  }
+
   // ソロエルリンク（URL未設定時は検索）
   function soloelLink(itemName, directUrl) {
     if (directUrl && String(directUrl).trim()) return String(directUrl).trim();
@@ -70,9 +89,7 @@
       if ('setAppBadge' in navigator) {
         navigator.setAppBadge(count);
       }
-    } catch (e) {
-      // iOS など非対応は無視
-    }
+    } catch (_) {}
     const badge = document.getElementById('shortageBadge');
     if (badge) badge.textContent = `不足 ${count}`;
   }
@@ -92,12 +109,12 @@
       });
     });
 
-    // ソロエルトップ
+    // ソロエルトップを開く
     document.getElementById('openSoloelTop')?.addEventListener('click', () => {
       window.open('https://solution.soloel.com/', '_blank');
     });
 
-    // テスト減算ボタン
+    // 自動減算（テスト）
     document.getElementById('runDecrement')?.addEventListener('click', async () => {
       try {
         disableButtons(true);
@@ -111,7 +128,7 @@
       }
     });
 
-    // リロード
+    // 最新データ取得
     document.getElementById('reloadItems')?.addEventListener('click', async () => {
       try {
         disableButtons(true);
@@ -129,8 +146,10 @@
 
     // イベント委譲（不足・一覧）
     document.getElementById('shortagesContainer')?.addEventListener('click', onCardClick);
+    document.getElementById('shortagesContainer')?.addEventListener('input', onQtyInput);
     document.getElementById('shortagesContainer')?.addEventListener('change', onQtyChange);
     document.getElementById('itemsContainer')?.addEventListener('click', onCardClick);
+    document.getElementById('itemsContainer')?.addEventListener('input', onQtyInput);
     document.getElementById('itemsContainer')?.addEventListener('change', onQtyChange);
   }
 
@@ -138,13 +157,39 @@
     document.querySelectorAll('button').forEach(b => b.disabled = !!disabled);
   }
 
-  // 在庫更新（−/＋/直入力）
+  // 入力中のリロード衝突を避ける制御
+  let pendingReload = false;
+  function safeReload() {
+    const ae = document.activeElement;
+    if (ae && ae.classList && ae.classList.contains('qty-input')) {
+      pendingReload = true;
+      return;
+    }
+    loadItems().catch(() => {});
+  }
+
+  // フォーカスが入力から外れたら保留中のリロードを実行
+  document.addEventListener('focusout', () => {
+    setTimeout(() => {
+      const ae = document.activeElement;
+      const typing = ae && ae.classList && ae.classList.contains('qty-input');
+      if (!typing && pendingReload) {
+        pendingReload = false;
+        loadItems().catch(() => {});
+      }
+    }, 0);
+  });
+
+  // 在庫更新（ボタン/直接入力）→ /stock/update
+  // 直後に全体再描画はせず、ローカル更新 + 安全リロード
   async function updateStock(id, value) {
     const v = Math.max(0, Number(value) || 0);
     await api('/stock/update', { method: 'POST', body: { id: Number(id), value: v } });
-    await loadItems();
+    const idx = allItems.findIndex(it => Number(readFields(it).id) === Number(id));
+    if (idx >= 0) allItems[idx]['現在庫数'] = v; // ローカル整合性用
   }
 
+  // ±ボタンクリック
   async function onCardClick(e) {
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
@@ -157,13 +202,37 @@
       const next = Math.max(0, Math.round((current - 1) * 100) / 100);
       input.value = fmt2(next);
       await updateStock(id, next);
+      safeReload();
     } else if (action === 'inc') {
       const next = Math.round((current + 1) * 100) / 100;
       input.value = fmt2(next);
       await updateStock(id, next);
+      safeReload();
     }
   }
 
+  // 入力デバウンス保存（停止後に自動保存）
+  const saveTimers = new Map(); // id -> timer
+  function onQtyInput(e) {
+    const input = e.target.closest('input.qty-input');
+    if (!input) return;
+    const id = input.getAttribute('data-id');
+    const v = Number(input.value);
+    if (Number.isNaN(v)) return; // 入力途中（空/記号）は無視
+    if (saveTimers.has(id)) clearTimeout(saveTimers.get(id));
+    const t = setTimeout(async () => {
+      try {
+        await updateStock(id, v);
+        input.value = fmt2(v);
+        safeReload();
+      } finally {
+        saveTimers.delete(id);
+      }
+    }, 600);
+    saveTimers.set(id, t);
+  }
+
+  // 変更確定（フォーカスアウトや Enter など）
   async function onQtyChange(e) {
     const input = e.target.closest('input.qty-input');
     if (!input) return;
@@ -174,6 +243,8 @@
       return;
     }
     await updateStock(id, v);
+    input.value = fmt2(v);
+    safeReload();
   }
 
   // アイテム読み込み
@@ -181,8 +252,11 @@
     try {
       const data = await api('/items');
       allItems = Array.isArray(data) ? data : [];
-      // 不足抽出
-      shortages = allItems.filter(it => Number(it['現在庫数']) < Number(it['最低在庫数']));
+      // 不足抽出（読み取り正規化経由）
+      shortages = allItems.filter(it => {
+        const f = readFields(it);
+        return Number(f.cur) < Number(f.min);
+      });
       updateBadge(shortages.length);
       renderShortages();
       renderItems();
@@ -195,7 +269,7 @@
   function renderShortages() {
     const wrap = document.getElementById('shortagesContainer');
     if (!wrap) return;
-    wrap.innerHTML = shortages.map(renderItemCard).join('') || '<p>不足はありません。</p>';
+    wrap.innerHTML = shortages.map(renderItemCard).join('') || '<p>不足はありません</p>';
   }
 
   function renderItems() {
@@ -204,26 +278,28 @@
     const q = (document.getElementById('searchInput')?.value || '').trim().toLowerCase();
     const cat = document.getElementById('categorySelect')?.value || '';
     const list = allItems.filter(it => {
-      const okQ = !q || String(it['商品名']).toLowerCase().includes(q);
-      const okC = !cat || String(it['カテゴリ'] || '') === cat;
+      const f = readFields(it);
+      const okQ = !q || String(f.name).toLowerCase().includes(q);
+      const okC = !cat || String(f.category) === cat;
       return okQ && okC;
     });
-    wrap.innerHTML = list.map(renderItemCard).join('') || '<p>データがありません。</p>';
+    wrap.innerHTML = list.map(renderItemCard).join('') || '<p>データがありません</p>';
   }
 
   function renderItemCard(it) {
-    const id = it['ID'];
-    const name = it['商品名'];
-    const unit = it['単位'] || '';
-    const cur = Number(it['現在庫数']) || 0;
-    const min = Number(it['最低在庫数']) || 0;
+    const f = readFields(it);
+    const id = f.id;
+    const name = f.name;
+    const unit = f.unit || '';
+    const cur = Number(f.cur) || 0;
+    const min = Number(f.min) || 0;
     const shortage = cur < min;
-    const url = soloelLink(name, it['ソロエルURL（任意）']);
+    const url = soloelLink(name, f.soloel);
     return `
 <article class="card ${shortage ? 'shortage' : ''}" aria-label="${name}">
   <div class="card-header">
     <h3 class="item-title">${escapeHtml(name)}</h3>
-    <small class="item-meta">${escapeHtml(it['カテゴリ'] || '')}</small>
+    <small class="item-meta">${escapeHtml(f.category)}</small>
   </div>
   <div class="item-meta">在庫 ${fmt2(cur)}${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}</div>
   <div class="controls">
@@ -254,3 +330,4 @@
     try { await loadItems(); } catch (_) {}
   });
 })();
+
