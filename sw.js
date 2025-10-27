@@ -1,5 +1,5 @@
 // 簡易オフラインキャッシュ（Cache First）
-const CACHE_NAME = 'yogu-stock-cache-v1';
+const CACHE_NAME = 'yogu-stock-cache-v2';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -36,4 +36,3 @@ self.addEventListener('fetch', event => {
     }).catch(() => cached))
   );
 });
-
