@@ -92,6 +92,12 @@ main { padding: 12px; }
 
 .links { display: flex; gap: 8px; flex-wrap: wrap; }
 .link { color: #2563eb; text-decoration: none; }
+.link { font-size: 0; }
+.link::after { font-size: 14px; content: 'リンクを開く'; }
+.link[href^="mailto:"]::after { content: 'メールする'; }
+.link[href^="tel:"]::after { content: '電話する'; }
+.link[href*="guest.aterra.co.jp"]::after { content: 'アルマテラ'; }
+.link[href*="soloel.com"]::after { content: 'ソロエルアリーナ'; }
 .link:hover { text-decoration: underline; }
 
 .panel { background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 12px; }
@@ -106,4 +112,3 @@ main { padding: 12px; }
 @media (min-width: 980px) {
   .cards { grid-template-columns: repeat(3, 1fr); }
 }
-

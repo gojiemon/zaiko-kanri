@@ -1,30 +1,29 @@
 // 在庫管理 PWA フロントエンド
 // - Service Worker 登録
-// - API ラッパー
-// - 画面タブ切替
+// - GAS API ラッパー
+// - タブ切替とイベント初期化
 // - /items 取得、一覧と不足描画
-// - 在庫更新（ボタン/直接入力）→ /stock/update（入力中は安全に再描画）
+// - 在庫更新（±ボタン/直接入力）: /stock/update
 // - Badging API で不足件数表示
-// - ネットエラーは alert
 
 (() => {
   'use strict';
 
-  // API ベース URL（env.js で設定）
+  // API ベース URL は env.js で設定
   const API_BASE = (typeof GAS_API_BASE === 'string') ? GAS_API_BASE : '';
   if (!API_BASE) {
-    console.warn('GAS_API_BASE が未設定です。env.js を編集してください。');
+    console.warn('GAS_API_BASE が未設定です。env.js を設定してください');
   }
 
   // グローバル状態
-  let allItems = []; // Items の全件
-  let shortages = []; // 不足アイテム
+  let allItems = [];
+  let shortages = [];
 
   // PWA: Service Worker 登録
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('sw.js').catch(err => {
-        console.warn('Service Worker 登録失敗', err);
+        console.warn('Service Worker 登録に失敗しました', err);
       });
     });
   }
@@ -38,8 +37,6 @@
       for (const [k, v] of Object.entries(query)) params.set(k, String(v));
     }
     const url = `${API_BASE}?${params.toString()}`;
-    // 注意: GAS Webアプリへのクロスオリジン POST で Content-Type: application/json を付けると
-    // Preflight で失敗する場合があるため、素のテキストで JSON を送る
     const init = { method };
     if (body != null) init.body = JSON.stringify(body);
     const res = await fetch(url, init);
@@ -56,7 +53,7 @@
     return (Math.round(Number(n) * 100) / 100).toFixed(2);
   }
 
-  // 文字化け対策: ヘッダー名の候補から拾う
+  // 候補から最初に見つかった値を取る
   function firstField(obj, keys) {
     for (const k of keys) {
       if (obj != null && obj[k] != null && obj[k] !== '') return obj[k];
@@ -64,37 +61,62 @@
     return undefined;
   }
 
+  // 受け取った1行を正規化
   function readFields(it) {
-    // 正常な日本語ヘッダー + 一部で見かけた化けヘッダー候補
     const id = Number(it['ID'] ?? it['Id'] ?? it['id']);
-    const name = firstField(it, ['商品名', '啁E��吁E']) || '';
-    const unit = firstField(it, ['単位', '単佁E']) || '';
-    const cur = Number(firstField(it, ['現在庫数'])) || 0;
-    const min = Number(firstField(it, ['最低在庫数'])) || 0;
-    const category = firstField(it, ['カテゴリー', 'カテゴリ', 'カチE��リ']) || '';
-    const soloel = firstField(it, ['ソロエルURL（任意）', 'ソロエルURL', 'ソロエルURL�E�任意！E']) || '';
+    const name = firstField(it, ['商品名', '品名', '名称']) || '';
+    const unit = firstField(it, ['単位']) || '';
+    const cur = Number(firstField(it, ['現在庫数', '現在在庫'])) || 0;
+    const min = Number(firstField(it, ['最低在庫数', '下限'])) || 0;
+    const category = firstField(it, ['カテゴリー', 'カテゴリ', '分類']) || '';
+    let soloel = firstField(it, [
+      'ソロURLアリーナURL',
+      'ソロエルURLアリーナURL',
+      'ソロエルアリーナURL',
+      'ソロエルアリーナ',
+      'ソロエルURL（任意）',
+      'ソロエルURL',
+      'ソロURL',
+      'アリーナURL'
+    ]) || '';
+    if (!soloel) {
+      try {
+        for (const k of Object.keys(it)) {
+          const ks = String(k);
+          const hasSolo = ks.includes('ソロ') || ks.includes('ソロエル') || ks.toLowerCase().includes('soloel');
+          const hasArena = ks.includes('アリ') || ks.includes('アリーナ');
+          const hasUrl = ks.toLowerCase().includes('url') || ks.includes('ＵＲＬ');
+          if ((hasSolo && hasUrl) || (hasArena && hasUrl) || ks.includes('ソロURLアリーナURL')) {
+            const v = it[k];
+            if (v != null && String(v).trim() !== '') {
+              soloel = v;
+              break;
+            }
+          }
+        }
+      } catch (_) {}
+    }
     return { id, name, unit, cur, min, category, soloel };
   }
 
-  // ソロエルリンク（URL未設定時は検索）
+  // リンク決定（URL未設定時は検索）
   function soloelLink(itemName, directUrl) {
-    if (directUrl && String(directUrl).trim()) return String(directUrl).trim();
+    const direct = String(directUrl || '').trim();
+    if (direct) return direct;
     const q = encodeURIComponent(String(itemName || ''));
     return `https://solution.soloel.com/s/?q=${q}`;
   }
 
-  // バッジ更新（非対応は無視）
+  // 不足件数バッジ更新
   function updateBadge(count) {
     try {
-      if ('setAppBadge' in navigator) {
-        navigator.setAppBadge(count);
-      }
+      if ('setAppBadge' in navigator) navigator.setAppBadge(count);
     } catch (_) {}
     const badge = document.getElementById('shortageBadge');
     if (badge) badge.textContent = `不足 ${count}`;
   }
 
-  // 画面の初期化
+  // 画面初期化
   function initUI() {
     // タブ切替
     const tabs = document.querySelectorAll('.tab');
@@ -109,7 +131,7 @@
       });
     });
 
-    // ソロエルトップを開く
+    // ソロエルトップ
     document.getElementById('openSoloelTop')?.addEventListener('click', () => {
       window.open('https://solution.soloel.com/', '_blank');
     });
@@ -120,7 +142,7 @@
         disableButtons(true);
         await api('/decrement/run', { method: 'POST' });
         await loadItems();
-        alert('自動減算を実行しました。メール通知設定があれば送信されます。');
+        alert('自動減算を実行しました');
       } catch (e) {
         alert(`エラー: ${e.message}`);
       } finally {
@@ -157,7 +179,7 @@
     document.querySelectorAll('button').forEach(b => b.disabled = !!disabled);
   }
 
-  // 入力中のリロード衝突を避ける制御
+  // 入力中のリロード衝突を避ける
   let pendingReload = false;
   function safeReload() {
     const ae = document.activeElement;
@@ -180,13 +202,12 @@
     }, 0);
   });
 
-  // 在庫更新（ボタン/直接入力）→ /stock/update
-  // 直後に全体再描画はせず、ローカル更新 + 安全リロード
+  // 在庫更新
   async function updateStock(id, value) {
     const v = Math.max(0, Number(value) || 0);
     await api('/stock/update', { method: 'POST', body: { id: Number(id), value: v } });
     const idx = allItems.findIndex(it => Number(readFields(it).id) === Number(id));
-    if (idx >= 0) allItems[idx]['現在庫数'] = v; // ローカル整合性用
+    if (idx >= 0) allItems[idx]['現在庫数'] = v; // ローカル整合性
   }
 
   // ±ボタンクリック
@@ -218,7 +239,7 @@
     if (!input) return;
     const id = input.getAttribute('data-id');
     const v = Number(input.value);
-    if (Number.isNaN(v)) return; // 入力途中（空/記号）は無視
+    if (Number.isNaN(v)) return; // 入力途中の空/記号は無視
     if (saveTimers.has(id)) clearTimeout(saveTimers.get(id));
     const t = setTimeout(async () => {
       try {
@@ -232,7 +253,7 @@
     saveTimers.set(id, t);
   }
 
-  // 変更確定（フォーカスアウトや Enter など）
+  // 変更確定
   async function onQtyChange(e) {
     const input = e.target.closest('input.qty-input');
     if (!input) return;
@@ -252,7 +273,6 @@
     try {
       const data = await api('/items');
       allItems = Array.isArray(data) ? data : [];
-      // 不足抽出（読み取り正規化経由）
       shortages = allItems.filter(it => {
         const f = readFields(it);
         return Number(f.cur) < Number(f.min);
@@ -269,7 +289,8 @@
   function renderShortages() {
     const wrap = document.getElementById('shortagesContainer');
     if (!wrap) return;
-    wrap.innerHTML = shortages.map(renderItemCard).join('') || '<p>不足はありません</p>';
+    const list = shortages.map(renderItemCard).join('');
+    wrap.innerHTML = list || '<p>不足はありません</p>';
   }
 
   function renderItems() {
@@ -283,7 +304,8 @@
       const okC = !cat || String(f.category) === cat;
       return okQ && okC;
     });
-    wrap.innerHTML = list.map(renderItemCard).join('') || '<p>データがありません</p>';
+    const html = list.map(renderItemCard).join('');
+    wrap.innerHTML = html || '<p>データがありません</p>';
   }
 
   function renderItemCard(it) {
@@ -294,9 +316,18 @@
     const cur = Number(f.cur) || 0;
     const min = Number(f.min) || 0;
     const shortage = cur < min;
-    const url = soloelLink(name, f.soloel);
+    const direct = String(f.soloel || '').trim();
+    let linkHtml = '';
+    if (direct) {
+      const lower = direct.toLowerCase();
+      if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('mailto:') || lower.startsWith('tel:')) {
+        linkHtml = `<a class="link" href="${direct}" target="_blank" rel="noopener noreferrer">${escapeHtml(direct)}</a>`;
+      } else {
+        linkHtml = `<span class="note">${escapeHtml(direct)}</span>`;
+      }
+    }
     return `
-<article class="card ${shortage ? 'shortage' : ''}" aria-label="${name}">
+<article class="card ${shortage ? 'shortage' : ''}" aria-label="${escapeHtml(name)}">
   <div class="card-header">
     <h3 class="item-title">${escapeHtml(name)}</h3>
     <small class="item-meta">${escapeHtml(f.category)}</small>
@@ -308,9 +339,7 @@
       <button class="step" aria-label="1増やす" data-action="inc" data-id="${id}">＋</button>
     </div>
     <input class="qty-input" type="number" step="0.01" inputmode="decimal" value="${fmt2(cur)}" data-id="${id}" aria-label="数量を直接入力" />
-    <div class="links">
-      <a class="link" href="${url}" target="_blank" rel="noopener noreferrer">ソロエルで検索</a>
-    </div>
+    <div class="links">${linkHtml}</div>
   </div>
 </article>`;
   }
@@ -330,4 +359,3 @@
     try { await loadItems(); } catch (_) {}
   });
 })();
-

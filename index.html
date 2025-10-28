@@ -22,14 +22,14 @@
   <nav class="tabs" role="tablist" aria-label="メインタブ">
     <button class="tab active" role="tab" aria-selected="true" aria-controls="view-shortages" id="tab-shortages">今日の不足</button>
     <button class="tab" role="tab" aria-selected="false" aria-controls="view-items" id="tab-items">在庫一覧</button>
-    <button class="tab" role="tab" aria-selected="false" aria-controls="view-settings" id="tab-settings">自動減算の設定</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="view-settings" id="tab-settings">自動減算・設定</button>
   </nav>
 
   <main>
     <!-- 今日の不足 -->
     <section id="view-shortages" class="view active" role="tabpanel" aria-labelledby="tab-shortages">
       <div class="toolbar">
-        <button id="openSoloelTop" class="btn">ソロエル（検索）を開く</button>
+        <button id="openSoloelTop" class="btn">ソロエル検索を開く</button>
       </div>
       <div id="shortagesContainer" class="cards" aria-live="polite"></div>
     </section>
@@ -37,7 +37,7 @@
     <!-- 在庫一覧 -->
     <section id="view-items" class="view" role="tabpanel" aria-labelledby="tab-items">
       <div class="toolbar row-gap">
-        <input id="searchInput" type="search" placeholder="検索（商品名）" aria-label="商品名で検索" />
+        <input id="searchInput" type="search" placeholder="商品名で検索" aria-label="商品名で検索" />
         <select id="categorySelect" aria-label="カテゴリーで絞り込み">
           <option value="">すべてのカテゴリー</option>
           <option value="食品">食品</option>
@@ -49,14 +49,14 @@
       <div id="itemsContainer" class="cards" aria-live="polite"></div>
     </section>
 
-    <!-- 自動減算の設定 -->
+    <!-- 自動減算・設定 -->
     <section id="view-settings" class="view" role="tabpanel" aria-labelledby="tab-settings">
       <div class="panel">
         <h2>季節係数と土日係数</h2>
         <ul class="list">
-          <li>冬（11〜2月）: 0.5</li>
-          <li>中間（3〜5, 10月）: 1.0</li>
-          <li>夏（6〜9月）: 1.5</li>
+          <li>冬: 0.5</li>
+          <li>中間: 1.0</li>
+          <li>夏: 1.5</li>
           <li>土日係数: 1.2</li>
         </ul>
 
@@ -64,7 +64,7 @@
           <button id="runDecrement" class="btn primary">今すぐ自動減算（テスト）</button>
           <button id="reloadItems" class="btn">最新データ取得</button>
         </div>
-        <p class="note">「夏の自動減算オフ」の編集は、今回はスプレッドシートで行ってください。</p>
+        <p class="note">「夏の自動減算オフ」の設定は、スプレッドシートで行ってください。</p>
       </div>
     </section>
   </main>
@@ -79,4 +79,3 @@
   <script src="app.js"></script>
 </body>
 </html>
-
