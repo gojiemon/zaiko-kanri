@@ -119,14 +119,16 @@
     'ロゴシール': 1,
   };
 
-  // 商品名から発注数量を検索（部分一致）
+  // 商品名から発注数量を検索（スペース無視・部分一致）
   function getRestockQty(itemName) {
     const name = String(itemName || '').trim();
     if (!name) return null;
     if (RESTOCK_QTY[name] != null) return RESTOCK_QTY[name];
+    const nameNoSpace = name.replace(/\s+/g, '');
     const keys = Object.keys(RESTOCK_QTY).sort((a, b) => b.length - a.length);
     for (const key of keys) {
-      if (name.includes(key)) return RESTOCK_QTY[key];
+      const keyNoSpace = key.replace(/\s+/g, '');
+      if (nameNoSpace.includes(keyNoSpace) || name.includes(key)) return RESTOCK_QTY[key];
     }
     return null;
   }
