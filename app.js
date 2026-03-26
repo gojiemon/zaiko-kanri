@@ -3,7 +3,7 @@
 // - GAS API ラッパー
 // - タブ切替とイベント初期化
 // - /items 取得、一覧と不足描画
-// - 在庫更新（±ボタン/直接入力）: /stock/update
+// - 在庫更新: 変更を保留 → まとめて一括登録
 // - Badging API で不足件数表示
 
 (() => {
@@ -18,6 +18,9 @@
   // グローバル状態
   let allItems = [];
   let shortages = [];
+
+  // 未保存の変更を保持 (id → newValue)
+  const pendingChanges = new Map();
 
   // 発注数量マスター（商品名 → 補充数量）
   // ボタン1つで在庫をこの数量にセットする
@@ -37,9 +40,9 @@
     'グラノーラ': 3,
     'ミント': 1,
     '牛乳': 1,
-    'エンボス手袋S': 100,
-    'エンボス手袋M': 100,
-    'エンボス手袋L': 100,
+    'エンボス手袋S': 50,
+    'エンボス手袋M': 50,
+    'エンボス手袋L': 50,
     'ゴム手袋M': 5,
     'ゴム手袋L': 5,
     'マスク': 100,
@@ -55,7 +58,7 @@
     'ハンドソープ': 1,
     '布巾': 5,
     'トイレットペーパー': 6,
-    'トイレの掃除シート': 1,
+    'トイレの掃除シート': 5,
     '消臭スプレー': 1,
     'クレンザー': 1,
     'コロコロシート': 5,
@@ -81,11 +84,11 @@
     '生乗せプラスプーン': 500,
     '飲むヨーグルトストロー': 50,
     'アイスコーヒーストロー': 50,
-    'フォーム袋大': 50,
-    'フォーム袋小': 30,
+    'フォーム袋大': 30,
+    'フォーム袋小': 50,
     'レジ袋': 100,
-    'ケーキ袋大': 20,
-    'ケーキ袋小': 20,
+    'ケーキ袋大': 10,
+    'ケーキ袋小': 10,
     '紙袋茶色': 50,
     'サンド袋テイクアウト': 100,
     'サンド袋': 100,
@@ -105,6 +108,7 @@
     'キャンドル': 10,
     '緩衝材スチロール': 1,
     'OPPテープ': 1,
+    'ヤマト伝票': 50,
     '和伝票': 50,
     '保冷剤': 20,
     '保冷バッグ': 10,
@@ -119,9 +123,7 @@
   function getRestockQty(itemName) {
     const name = String(itemName || '').trim();
     if (!name) return null;
-    // 完全一致を優先
     if (RESTOCK_QTY[name] != null) return RESTOCK_QTY[name];
-    // 部分一致（長いキーから試して最も具体的にマッチ）
     const keys = Object.keys(RESTOCK_QTY).sort((a, b) => b.length - a.length);
     for (const key of keys) {
       if (name.includes(key)) return RESTOCK_QTY[key];
@@ -226,6 +228,62 @@
     if (badge) badge.textContent = `不足 ${count}`;
   }
 
+  // ===== 保留変更の管理 =====
+  function addPending(id, value) {
+    pendingChanges.set(String(id), Math.max(0, Number(value) || 0));
+    updateSaveBar();
+  }
+
+  function updateSaveBar() {
+    const bar = document.getElementById('saveBar');
+    const count = pendingChanges.size;
+    if (count > 0) {
+      bar.classList.add('visible');
+      document.getElementById('saveCount').textContent = count;
+    } else {
+      bar.classList.remove('visible');
+    }
+  }
+
+  async function submitAllChanges() {
+    if (pendingChanges.size === 0) return;
+    const saveBtn = document.getElementById('saveAllBtn');
+    saveBtn.disabled = true;
+    saveBtn.textContent = '送信中...';
+    disableButtons(true);
+    saveBtn.disabled = true; // disableButtons で解除されないように再設定
+
+    const items = [];
+    for (const [id, value] of pendingChanges) {
+      items.push({ id: Number(id), value });
+    }
+
+    try {
+      await api('/stock/batch-update', { method: 'POST', body: { items } });
+      // ローカル整合性も更新
+      for (const { id, value } of items) {
+        const idx = allItems.findIndex(it => Number(readFields(it).id) === id);
+        if (idx >= 0) {
+          const stockKey = ['現在庫数', '現在在庫'].find(k => allItems[idx][k] != null) || '現在庫数';
+          allItems[idx][stockKey] = value;
+        }
+      }
+      pendingChanges.clear();
+      updateSaveBar();
+      try {
+        await loadItems();
+      } catch (_) {
+        alert('登録は成功しました。「最新データ取得」で画面を更新してください。');
+      }
+    } catch (e) {
+      alert(`保存に失敗しました: ${e.message}`);
+    } finally {
+      disableButtons(false);
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'まとめて登録';
+    }
+  }
+
   // 画面初期化
   function initUI() {
     // タブ切替
@@ -272,16 +330,22 @@
       }
     });
 
+    // まとめて登録ボタン
+    document.getElementById('saveAllBtn')?.addEventListener('click', () => {
+      submitAllChanges();
+    });
+
     // フィルタ
     document.getElementById('searchInput')?.addEventListener('input', () => renderItems());
     document.getElementById('categorySelect')?.addEventListener('change', () => renderItems());
 
-    // イベント委譲（不足・一覧）
+    // イベント委譲（不足・一覧）— すべてローカル保留のみ
+    // blur はバブリングしないのでキャプチャフェーズで委譲
     document.getElementById('shortagesContainer')?.addEventListener('click', onCardClick);
-    document.getElementById('shortagesContainer')?.addEventListener('change', onQtyChange);
+    document.getElementById('shortagesContainer')?.addEventListener('blur', onQtyBlur, true);
     document.getElementById('shortagesContainer')?.addEventListener('keydown', onQtyKeydown);
     document.getElementById('itemsContainer')?.addEventListener('click', onCardClick);
-    document.getElementById('itemsContainer')?.addEventListener('change', onQtyChange);
+    document.getElementById('itemsContainer')?.addEventListener('blur', onQtyBlur, true);
     document.getElementById('itemsContainer')?.addEventListener('keydown', onQtyKeydown);
   }
 
@@ -289,42 +353,8 @@
     document.querySelectorAll('button').forEach(b => b.disabled = !!disabled);
   }
 
-  // 入力中のリロード衝突を避ける
-  let pendingReload = false;
-  function safeReload() {
-    const ae = document.activeElement;
-    if (ae && ae.classList && ae.classList.contains('qty-input')) {
-      pendingReload = true;
-      return;
-    }
-    loadItems().catch(() => {});
-  }
-
-  // フォーカスが入力から外れたら保留中のリロードを実行
-  document.addEventListener('focusout', () => {
-    setTimeout(() => {
-      const ae = document.activeElement;
-      const typing = ae && ae.classList && ae.classList.contains('qty-input');
-      if (!typing && pendingReload) {
-        pendingReload = false;
-        loadItems().catch(() => {});
-      }
-    }, 0);
-  });
-
-  // 在庫更新
-  async function updateStock(id, value) {
-    const v = Math.max(0, Number(value) || 0);
-    await api('/stock/update', { method: 'POST', body: { id: Number(id), value: v } });
-    const idx = allItems.findIndex(it => Number(readFields(it).id) === Number(id));
-    if (idx >= 0) {
-      const stockKey = ['現在庫数', '現在在庫'].find(k => allItems[idx][k] != null) || '現在庫数';
-      allItems[idx][stockKey] = v;
-    }
-  }
-
-  // ボタンクリック（±、補充）
-  async function onCardClick(e) {
+  // ボタンクリック（±、補充）→ ローカル保留のみ
+  function onCardClick(e) {
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
     const action = btn.getAttribute('data-action');
@@ -335,24 +365,24 @@
     if (action === 'dec') {
       const next = Math.max(0, Math.round((current - 1) * 100) / 100);
       input.value = fmt2(next);
-      btn.disabled = true;
-      try { await updateStock(id, next); safeReload(); } finally { btn.disabled = false; }
+      addPending(id, next);
+      markChanged(input);
     } else if (action === 'inc') {
       const next = Math.round((current + 1) * 100) / 100;
       input.value = fmt2(next);
-      btn.disabled = true;
-      try { await updateStock(id, next); safeReload(); } finally { btn.disabled = false; }
+      addPending(id, next);
+      markChanged(input);
     } else if (action === 'restock') {
       const qty = Number(btn.getAttribute('data-qty')) || 0;
       if (qty <= 0) return;
       input.value = fmt2(qty);
-      btn.disabled = true;
-      try { await updateStock(id, qty); safeReload(); } finally { btn.disabled = false; }
+      addPending(id, qty);
+      markChanged(input);
     }
   }
 
-  // 数値入力 — Enter または blur 時のみ保存（入力中は何もしない）
-  async function onQtyChange(e) {
+  // 数値入力 — Enter または blur で保留に追加（APIは叩かない）
+  function onQtyBlur(e) {
     const input = e.target.closest('input.qty-input');
     if (!input) return;
     const id = input.getAttribute('data-id');
@@ -362,14 +392,9 @@
       alert('数値を入力してください');
       return;
     }
-    input.disabled = true;
-    try {
-      await updateStock(id, v);
-      input.value = fmt2(v);
-      safeReload();
-    } finally {
-      input.disabled = false;
-    }
+    addPending(id, v);
+    input.value = fmt2(v);
+    markChanged(input);
   }
 
   // Enter キーで確定（blur を発火させる）
@@ -377,6 +402,12 @@
     if (e.key === 'Enter') {
       e.target.blur();
     }
+  }
+
+  // 変更済みカードにハイライト
+  function markChanged(input) {
+    const card = input.closest('.card');
+    if (card) card.classList.add('changed');
   }
 
   // アイテム読み込み
@@ -441,20 +472,23 @@
     const restockBtn = restockQty != null
       ? `<button class="btn restock" data-action="restock" data-id="${id}" data-qty="${restockQty}" aria-label="${restockQty}に補充">補充 → ${restockQty}${escapeHtml(unit)}</button>`
       : '';
+    // 保留中の値があればそちらを表示
+    const displayValue = pendingChanges.has(String(id)) ? pendingChanges.get(String(id)) : cur;
+    const isChanged = pendingChanges.has(String(id));
     return `
-<article class="card ${shortage ? 'shortage' : ''}" aria-label="${escapeHtml(name)}">
+<article class="card ${shortage ? 'shortage' : ''} ${isChanged ? 'changed' : ''}" aria-label="${escapeHtml(name)}">
   <div class="card-header">
     <h3 class="item-title">${escapeHtml(name)}</h3>
     <small class="item-meta">${escapeHtml(f.category)}</small>
   </div>
-  <div class="item-stock">在庫 <strong>${fmt2(cur)}</strong>${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}</div>
+  <div class="item-stock">在庫 <strong>${fmt2(cur)}</strong>${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}${isChanged ? ` <span class="pending-value">→ ${fmt2(displayValue)}</span>` : ''}</div>
   ${restockBtn}
   <div class="controls">
     <div class="stepper">
       <button class="step" aria-label="1減らす" data-action="dec" data-id="${id}">−</button>
       <button class="step" aria-label="1増やす" data-action="inc" data-id="${id}">＋</button>
     </div>
-    <input class="qty-input" type="number" step="0.01" inputmode="decimal" value="${fmt2(cur)}" data-id="${id}" aria-label="数量を直接入力" />
+    <input class="qty-input" type="number" step="0.01" inputmode="decimal" value="${fmt2(displayValue)}" data-id="${id}" aria-label="数量を直接入力" />
     <div class="links">${linkHtml}</div>
   </div>
 </article>`;

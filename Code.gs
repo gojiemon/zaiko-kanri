@@ -35,6 +35,22 @@ function doPost(e) {
       updateStock(id, value);
       return json({ ok: true, data: { id: id, value: value } });
     }
+    if (path === '/stock/batch-update') {
+      const items = body.items; // [{id, value}, ...]
+      if (!Array.isArray(items)) throw new Error('items配列が必要です');
+      if (items.length > 500) throw new Error('一度に更新できるのは500件までです');
+      const results = [];
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        var bid = Number(item.id);
+        var bval = Number(item.value);
+        if (!isFinite(bid) || bid <= 0) throw new Error('不正なID: ' + item.id);
+        if (!isFinite(bval) || bval < 0 || bval > 99999) throw new Error('不正な値: ' + item.value);
+        updateStock(bid, bval);
+        results.push({ id: bid, value: bval });
+      }
+      return json({ ok: true, data: { updated: results.length, items: results } });
+    }
     if (path === '/decrement/run') {
       const result = runDailyDecrement();
       return json({ ok: true, data: result });
