@@ -19,6 +19,116 @@
   let allItems = [];
   let shortages = [];
 
+  // 発注数量マスター（商品名 → 補充数量）
+  // ボタン1つで在庫をこの数量にセットする
+  const RESTOCK_QTY = {
+    '冷凍いちご': 10,
+    '冷凍マンゴー': 20,
+    '冷凍ブルーベリー': 15,
+    '冷凍ラズベリー': 1,
+    '冷凍ブラックベリー': 1,
+    'バナナ': 13,
+    'クリームチーズ': 12,
+    'コーヒー豆': 3,
+    'ガムシロップ': 50,
+    'スティックシュガー': 100,
+    'ミルクポーション': 100,
+    'フロスト': 1,
+    'グラノーラ': 3,
+    'ミント': 1,
+    '牛乳': 1,
+    'エンボス手袋S': 100,
+    'エンボス手袋M': 100,
+    'エンボス手袋L': 100,
+    'ゴム手袋M': 5,
+    'ゴム手袋L': 5,
+    'マスク': 100,
+    'ゴミ袋45L': 200,
+    'ゴミ袋20L': 100,
+    'サニタリー袋': 50,
+    'セロテープ': 1,
+    'マスキングテープ': 5,
+    'レジロール': 50,
+    'ステラレジロール': 20,
+    'ペーパータオル': 10,
+    'スポンジ': 3,
+    'ハンドソープ': 1,
+    '布巾': 5,
+    'トイレットペーパー': 6,
+    'トイレの掃除シート': 1,
+    '消臭スプレー': 1,
+    'クレンザー': 1,
+    'コロコロシート': 5,
+    'アルコール': 1,
+    '食器用洗剤': 3,
+    'キッチンペーパー': 1,
+    'ジップロック': 100,
+    'ラップ': 6,
+    'ナプキン': 10,
+    'おしぼり': 50,
+    'ペン': 1,
+    'ホワイトボードマーカー': 1,
+    'エスカップ': 1000,
+    'ダブルカップ': 1000,
+    'エスフタ': 1500,
+    'ホットドリンクカップ': 50,
+    'ホットドリンクフタ': 50,
+    '生乗せプラカップ大': 50,
+    '生乗せプラカップ小': 50,
+    '生乗せプラフタ大': 50,
+    '生乗せプラフタ小': 50,
+    'スプーン': 2000,
+    '生乗せプラスプーン': 500,
+    '飲むヨーグルトストロー': 50,
+    'アイスコーヒーストロー': 50,
+    'フォーム袋大': 50,
+    'フォーム袋小': 30,
+    'レジ袋': 100,
+    'ケーキ袋大': 20,
+    'ケーキ袋小': 20,
+    '紙袋茶色': 50,
+    'サンド袋テイクアウト': 100,
+    'サンド袋': 100,
+    'サンドフィルム': 100,
+    '持ち帰り用箱': 20,
+    'ケーキ箱大': 10,
+    'ケーキ箱小': 10,
+    'ケーキドーム大': 25,
+    'ケーキドーム小': 25,
+    'ケーキ底台': 25,
+    'ケーキ底生': 2,
+    'ケーキ台紙大': 200,
+    'ケーキ台紙小': 200,
+    'ケーキの型大': 50,
+    'ケーキの型小': 50,
+    'バースデープレート': 10,
+    'キャンドル': 10,
+    '緩衝材スチロール': 1,
+    'OPPテープ': 1,
+    '和伝票': 50,
+    '保冷剤': 20,
+    '保冷バッグ': 10,
+    '水飲みカップ': 200,
+    'ポイントカード': 100,
+    '青パンフ': 100,
+    'トイレマジックリン': 1,
+    'ロゴシール': 1,
+  };
+
+  // 商品名から発注数量を検索（部分一致）
+  function getRestockQty(itemName) {
+    const name = String(itemName || '').trim();
+    if (!name) return null;
+    // 完全一致を優先
+    if (RESTOCK_QTY[name] != null) return RESTOCK_QTY[name];
+    // 部分一致（長いキーから試して最も具体的にマッチ）
+    const keys = Object.keys(RESTOCK_QTY).sort((a, b) => b.length - a.length);
+    for (const key of keys) {
+      if (name.includes(key)) return RESTOCK_QTY[key];
+    }
+    return null;
+  }
+
   // PWA: Service Worker 登録
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
@@ -168,11 +278,11 @@
 
     // イベント委譲（不足・一覧）
     document.getElementById('shortagesContainer')?.addEventListener('click', onCardClick);
-    document.getElementById('shortagesContainer')?.addEventListener('input', onQtyInput);
     document.getElementById('shortagesContainer')?.addEventListener('change', onQtyChange);
+    document.getElementById('shortagesContainer')?.addEventListener('keydown', onQtyKeydown);
     document.getElementById('itemsContainer')?.addEventListener('click', onCardClick);
-    document.getElementById('itemsContainer')?.addEventListener('input', onQtyInput);
     document.getElementById('itemsContainer')?.addEventListener('change', onQtyChange);
+    document.getElementById('itemsContainer')?.addEventListener('keydown', onQtyKeydown);
   }
 
   function disableButtons(disabled) {
@@ -207,10 +317,13 @@
     const v = Math.max(0, Number(value) || 0);
     await api('/stock/update', { method: 'POST', body: { id: Number(id), value: v } });
     const idx = allItems.findIndex(it => Number(readFields(it).id) === Number(id));
-    if (idx >= 0) allItems[idx]['現在庫数'] = v; // ローカル整合性
+    if (idx >= 0) {
+      const stockKey = ['現在庫数', '現在在庫'].find(k => allItems[idx][k] != null) || '現在庫数';
+      allItems[idx][stockKey] = v;
+    }
   }
 
-  // ±ボタンクリック
+  // ボタンクリック（±、補充）
   async function onCardClick(e) {
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
@@ -222,50 +335,48 @@
     if (action === 'dec') {
       const next = Math.max(0, Math.round((current - 1) * 100) / 100);
       input.value = fmt2(next);
-      await updateStock(id, next);
-      safeReload();
+      btn.disabled = true;
+      try { await updateStock(id, next); safeReload(); } finally { btn.disabled = false; }
     } else if (action === 'inc') {
       const next = Math.round((current + 1) * 100) / 100;
       input.value = fmt2(next);
-      await updateStock(id, next);
-      safeReload();
+      btn.disabled = true;
+      try { await updateStock(id, next); safeReload(); } finally { btn.disabled = false; }
+    } else if (action === 'restock') {
+      const qty = Number(btn.getAttribute('data-qty')) || 0;
+      if (qty <= 0) return;
+      input.value = fmt2(qty);
+      btn.disabled = true;
+      try { await updateStock(id, qty); safeReload(); } finally { btn.disabled = false; }
     }
   }
 
-  // 入力デバウンス保存（停止後に自動保存）
-  const saveTimers = new Map(); // id -> timer
-  function onQtyInput(e) {
-    const input = e.target.closest('input.qty-input');
-    if (!input) return;
-    const id = input.getAttribute('data-id');
-    const v = Number(input.value);
-    if (Number.isNaN(v)) return; // 入力途中の空/記号は無視
-    if (saveTimers.has(id)) clearTimeout(saveTimers.get(id));
-    const t = setTimeout(async () => {
-      try {
-        await updateStock(id, v);
-        input.value = fmt2(v);
-        safeReload();
-      } finally {
-        saveTimers.delete(id);
-      }
-    }, 600);
-    saveTimers.set(id, t);
-  }
-
-  // 変更確定
+  // 数値入力 — Enter または blur 時のみ保存（入力中は何もしない）
   async function onQtyChange(e) {
     const input = e.target.closest('input.qty-input');
     if (!input) return;
     const id = input.getAttribute('data-id');
-    const v = Number(input.value);
-    if (Number.isNaN(v)) {
+    const raw = input.value.trim();
+    const v = Number(raw);
+    if (raw === '' || Number.isNaN(v)) {
       alert('数値を入力してください');
       return;
     }
-    await updateStock(id, v);
-    input.value = fmt2(v);
-    safeReload();
+    input.disabled = true;
+    try {
+      await updateStock(id, v);
+      input.value = fmt2(v);
+      safeReload();
+    } finally {
+      input.disabled = false;
+    }
+  }
+
+  // Enter キーで確定（blur を発火させる）
+  function onQtyKeydown(e) {
+    if (e.key === 'Enter') {
+      e.target.blur();
+    }
   }
 
   // アイテム読み込み
@@ -326,13 +437,18 @@
         linkHtml = `<span class="note">${escapeHtml(direct)}</span>`;
       }
     }
+    const restockQty = getRestockQty(name);
+    const restockBtn = restockQty != null
+      ? `<button class="btn restock" data-action="restock" data-id="${id}" data-qty="${restockQty}" aria-label="${restockQty}に補充">補充 → ${restockQty}${escapeHtml(unit)}</button>`
+      : '';
     return `
 <article class="card ${shortage ? 'shortage' : ''}" aria-label="${escapeHtml(name)}">
   <div class="card-header">
     <h3 class="item-title">${escapeHtml(name)}</h3>
     <small class="item-meta">${escapeHtml(f.category)}</small>
   </div>
-  <div class="item-meta">在庫 ${fmt2(cur)}${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}</div>
+  <div class="item-stock">在庫 <strong>${fmt2(cur)}</strong>${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}</div>
+  ${restockBtn}
   <div class="controls">
     <div class="stepper">
       <button class="step" aria-label="1減らす" data-action="dec" data-id="${id}">−</button>

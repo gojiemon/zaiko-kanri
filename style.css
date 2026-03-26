@@ -74,6 +74,25 @@ main { padding: 12px; }
 .card-header { display: flex; justify-content: space-between; align-items: center; }
 .item-title { font-size: 16px; font-weight: 600; margin: 0; }
 .item-meta { color: #666; font-size: 12px; }
+.item-stock { color: #666; font-size: 13px; }
+.item-stock strong { color: #222; font-size: 16px; }
+.card.shortage .item-stock strong { color: #dc2626; }
+
+.btn.restock {
+  width: 100%;
+  padding: 10px;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+}
+.btn.restock:hover { background: #1d4ed8; }
+.btn.restock:active { background: #1e40af; }
+.btn.restock:disabled { opacity: .6; cursor: default; }
 
 .controls {
   display: grid;
