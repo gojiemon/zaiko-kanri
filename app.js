@@ -253,15 +253,19 @@
     disableButtons(true);
     saveBtn.disabled = true; // disableButtons で解除されないように再設定
 
-    const items = [];
+    const entries = [];
     for (const [id, value] of pendingChanges) {
-      items.push({ id: Number(id), value });
+      entries.push({ id: Number(id), value });
     }
 
     try {
-      await api('/stock/batch-update', { method: 'POST', body: { items } });
-      // ローカル整合性も更新
-      for (const { id, value } of items) {
+      // 1件ずつ送信（GAS互換）、リロードは最後だけ
+      let doneCount = 0;
+      for (const { id, value } of entries) {
+        await api('/stock/update', { method: 'POST', body: { id, value } });
+        doneCount++;
+        saveBtn.textContent = `送信中... ${doneCount}/${entries.length}`;
+        // ローカル整合性
         const idx = allItems.findIndex(it => Number(readFields(it).id) === id);
         if (idx >= 0) {
           const stockKey = ['現在庫数', '現在在庫'].find(k => allItems[idx][k] != null) || '現在庫数';
@@ -273,10 +277,10 @@
       try {
         await loadItems();
       } catch (_) {
-        alert('登録は成功しました。「最新データ取得」で画面を更新してください。');
+        alert('登録完了。「最新データ取得」で画面を更新してください。');
       }
     } catch (e) {
-      alert(`保存に失敗しました: ${e.message}`);
+      alert(`保存に失敗しました（${entries.length}件中一部未送信の可能性）: ${e.message}`);
     } finally {
       disableButtons(false);
       saveBtn.disabled = false;
