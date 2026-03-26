@@ -388,8 +388,9 @@
     } else if (action === 'restock') {
       const qty = Number(btn.getAttribute('data-qty')) || 0;
       if (qty <= 0) return;
-      input.value = fmt2(qty);
-      addPending(id, qty);
+      const next = Math.round((current + qty) * 100) / 100;
+      input.value = fmt2(next);
+      addPending(id, next);
       markChanged(input);
     }
   }
@@ -483,7 +484,7 @@
     }
     const restockQty = getRestockQty(name);
     const restockBtn = restockQty != null
-      ? `<button class="btn restock" data-action="restock" data-id="${id}" data-qty="${restockQty}" aria-label="${restockQty}に補充">補充 → ${restockQty}${escapeHtml(unit)}</button>`
+      ? `<button class="btn restock" data-action="restock" data-id="${id}" data-qty="${restockQty}" aria-label="${restockQty}追加">＋${restockQty}${escapeHtml(unit)} 補充</button>`
       : '';
     // 保留中の値があればそちらを表示
     const displayValue = pendingChanges.has(String(id)) ? pendingChanges.get(String(id)) : cur;
