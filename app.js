@@ -57,8 +57,10 @@
     'スポンジ': 3,
     'ハンドソープ': 1,
     '布巾': 5,
+    'ふきん': 5,
     'トイレットペーパー': 6,
     'トイレの掃除シート': 5,
+    'トイレのお掃除シート': 5,
     '消臭スプレー': 1,
     'クレンザー': 1,
     'コロコロシート': 5,
@@ -72,8 +74,11 @@
     'ペン': 1,
     'ホワイトボードマーカー': 1,
     'エスカップ': 1000,
+    'Sカップ': 1000,
     'ダブルカップ': 1000,
+    'Wカップ': 1000,
     'エスフタ': 1500,
+    'Sフタ': 1500,
     'ホットドリンクカップ': 50,
     'ホットドリンクフタ': 50,
     '生乗せプラカップ大': 50,
@@ -119,16 +124,18 @@
     'ロゴシール': 1,
   };
 
-  // 商品名から発注数量を検索（スペース無視・部分一致）
+  // 商品名から発注数量を検索（スペース無視・大小文字無視・部分一致）
   function getRestockQty(itemName) {
     const name = String(itemName || '').trim();
     if (!name) return null;
+    // 完全一致
     if (RESTOCK_QTY[name] != null) return RESTOCK_QTY[name];
-    const nameNoSpace = name.replace(/\s+/g, '');
+    // 正規化して比較（スペース除去+小文字化）
+    const norm = s => s.replace(/\s+/g, '').toLowerCase();
+    const nameNorm = norm(name);
     const keys = Object.keys(RESTOCK_QTY).sort((a, b) => b.length - a.length);
     for (const key of keys) {
-      const keyNoSpace = key.replace(/\s+/g, '');
-      if (nameNoSpace.includes(keyNoSpace) || name.includes(key)) return RESTOCK_QTY[key];
+      if (nameNorm.includes(norm(key))) return RESTOCK_QTY[key];
     }
     return null;
   }
