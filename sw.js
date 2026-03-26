@@ -1,5 +1,5 @@
 // 簡易オフラインキャッシュ（Cache First）
-const CACHE_NAME = 'yogu-stock-cache-v12';
+const CACHE_NAME = 'yogu-stock-cache-v13';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -12,8 +12,8 @@ const CORE_ASSETS = [
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(cache => cache.addAll(CORE_ASSETS))
+      .then(() => self.skipWaiting())
   );
-  self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {
@@ -29,10 +29,13 @@ self.addEventListener('fetch', event => {
   // 同一オリジンのみキャッシュ。GAS等のクロスオリジンは素通し
   if (url.origin !== location.origin) return;
   event.respondWith(
-    caches.match(req).then(cached => cached || fetch(req).then(res => {
-      const resClone = res.clone();
-      caches.open(CACHE_NAME).then(cache => cache.put(req, resClone));
-      return res;
-    }).catch(() => cached))
+    caches.match(req).then(cached => {
+      if (cached) return cached;
+      return fetch(req).then(res => {
+        const resClone = res.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(req, resClone));
+        return res;
+      }).catch(() => new Response('Offline', { status: 503, statusText: 'Service Unavailable' }));
+    })
   );
 });

@@ -30,8 +30,10 @@ function doPost(e) {
     const body = JSON.parse(bodyText);
 
     if (path === '/stock/update') {
-      const id = Number(body.id);
-      const value = Number(body.value);
+      var id = Number(body.id);
+      var value = Number(body.value);
+      if (!isFinite(id) || id <= 0) throw new Error('不正なID: ' + body.id);
+      if (!isFinite(value) || value < 0 || value > 99999) throw new Error('不正な値: ' + body.value);
       updateStock(id, value);
       return json({ ok: true, data: { id: id, value: value } });
     }
@@ -145,7 +147,7 @@ function getShortages() {
 
 // ===== 在庫更新・ログ =====
 function updateStock(id, newValue) {
-  if (!id && id !== 0) throw new Error('IDが不正です');
+  if (!isFinite(id) || id <= 0) throw new Error('IDが不正です: ' + id);
   const sh = sheet('Items');
   const values = sh.getDataRange().getValues();
   if (values.length < 2) throw new Error('Itemsにデータがありません');

@@ -267,11 +267,13 @@
       entries.push({ id: Number(id), value });
     }
 
-    try {
-      // 1件ずつ送信（GAS互換）、リロードは最後だけ
-      let doneCount = 0;
-      for (const { id, value } of entries) {
+    const failed = [];
+    let doneCount = 0;
+    for (const { id, value } of entries) {
+      try {
         await api('/stock/update', { method: 'POST', body: { id, value } });
+        // 送信成功 → pendingから即削除
+        pendingChanges.delete(String(id));
         doneCount++;
         saveBtn.textContent = `送信中... ${doneCount}/${entries.length}`;
         // ローカル整合性
@@ -280,21 +282,22 @@
           const stockKey = ['現在庫数', '現在在庫'].find(k => allItems[idx][k] != null) || '現在庫数';
           allItems[idx][stockKey] = value;
         }
+      } catch (e) {
+        failed.push({ id, error: e.message });
       }
-      pendingChanges.clear();
-      updateSaveBar();
-      try {
-        await loadItems();
-      } catch (_) {
-        alert('登録完了。「最新データ取得」で画面を更新してください。');
-      }
-    } catch (e) {
-      alert(`保存に失敗しました（${entries.length}件中一部未送信の可能性）: ${e.message}`);
-    } finally {
-      disableButtons(false);
-      saveBtn.disabled = false;
-      saveBtn.textContent = 'まとめて登録';
     }
+    updateSaveBar();
+    if (failed.length > 0) {
+      alert(`${doneCount}件成功、${failed.length}件失敗しました。失敗分は未保存のまま残っています。`);
+    }
+    try {
+      await loadItems();
+    } catch (_) {
+      if (failed.length === 0) alert('登録完了。「最新データ取得」で画面を更新してください。');
+    }
+    disableButtons(false);
+    saveBtn.disabled = false;
+    saveBtn.textContent = 'まとめて登録';
   }
 
   // 画面初期化
@@ -303,9 +306,10 @@
     const tabs = document.querySelectorAll('.tab');
     tabs.forEach(tab => {
       tab.addEventListener('click', () => {
-        tabs.forEach(t => t.classList.remove('active'));
+        tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
         document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
         tab.classList.add('active');
+        tab.setAttribute('aria-selected', 'true');
         const viewId = tab.getAttribute('aria-controls');
         const view = document.getElementById(viewId);
         if (view) view.classList.add('active');
