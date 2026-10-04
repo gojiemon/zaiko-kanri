@@ -462,6 +462,8 @@ function recordFoodEvent(body) {
 //    「換算」に 1個（1箱）が在庫の単位でいくつか を入れる（例: エンボス手袋100枚入×在庫単位が枚 → 100）
 // 3. もう一度 refreshAskulRates → Items の「アスクル日次量」が埋まり、毎朝の自動減算がそれを使う
 const ASKUL_SHEET = 'AskulHistory';
+// この在庫管理はマルシェ店のもの（田川さん 2026-10-04）。本店宛ての発送は数えない
+const ASKUL_STORE = 'マルシェ';
 const ASKUL_WINDOW_DAYS = 365;
 const ASKUL_HEADERS = ['品番', '商品名（アスクル）', '期間内の数量', '発送回数', '最初の発送', '最後の発送',
   '在庫管理の商品名', '換算（1個＝在庫いくつ）', '1日あたり（換算後）'];
@@ -482,12 +484,24 @@ function parseAskulShipment(body) {
   return out;
 }
 
+// 届け先からどの店宛てかを判定。「お届け先情報」欄の会社名/部署名/住所で見る
+// マルシェ: 吉祥寺本町1-20-14 クスミビル / 本店: 吉祥寺南町1-4-1 井の頭ビル
+function askulStoreOf(body) {
+  const text = String(body).normalize('NFKC');
+  const i = text.indexOf('お届け先情報');
+  const dest = (i >= 0 ? text.slice(i, i + 400) : text).replace(/\s+/g, '');
+  if (dest.indexOf('マルシェ') >= 0 || dest.indexOf('本町1-20-14') >= 0) return 'マルシェ';
+  if (dest.indexOf('本店') >= 0 || dest.indexOf('南町1-4-1') >= 0) return '本店';
+  return '不明';
+}
+
 function refreshAskulRates() {
   const now = new Date();
   const since = new Date(now.getTime() - ASKUL_WINDOW_DAYS * 86400000);
   const byCode = {};
   const seen = {};
   let oldest = null;
+  const skipped = { '本店': 0, '不明': 0 };
   for (let start = 0; start < 2000; start += 100) {
     const threads = GmailApp.search('from:askul.co.jp subject:"商品発送のお知らせ" newer_than:' + ASKUL_WINDOW_DAYS + 'd', start, 100);
     if (!threads.length) break;
@@ -498,8 +512,11 @@ function refreshAskulRates() {
         if (msg.getSubject().indexOf('発送') < 0) return;
         const at = msg.getDate();
         if (at < since) return;
-        if (!oldest || at < oldest) oldest = at;
-        parseAskulShipment(msg.getPlainBody()).forEach(function (it) {
+        if (!oldest || at < oldest) oldest = at; // 期間の判定は店に関係なく（メールの残り具合を見る）
+        const body = msg.getPlainBody();
+        const store = askulStoreOf(body);
+        if (store !== ASKUL_STORE) { skipped[store] = (skipped[store] || 0) + 1; return; }
+        parseAskulShipment(body).forEach(function (it) {
           const c = (byCode[it.code] = byCode[it.code] || { name: it.name, qty: 0, times: 0, first: at, last: at });
           c.qty += it.qty;
           c.times += 1;
@@ -567,5 +584,6 @@ function refreshAskulRates() {
   });
   if (out.length) itemsSh.getRange(2, colAskul + 1, out.length, 1).setValues(out);
 
-  return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days) };
+  // 不明が多いときは届け先の書式が変わった可能性がある（マルシェ分の取りこぼし）
+  return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days), skippedHonten: skipped['本店'], skippedUnknown: skipped['不明'] };
 }
