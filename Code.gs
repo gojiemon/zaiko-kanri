@@ -228,7 +228,8 @@ function runDailyDecrement() {
 
   let updated = 0;
   const toSet = [];
-  // カップはPOSの実売（マルシェ）で減らす。取れなければカップだけ今日は減らさず、翌日まとめて引く
+  // POSの実売（マルシェ）: カップ・フタは個数そのもの、それ以外は売上連動の比率に使う。
+  // 取れなければ今日は減らさず、翌日まとめて引く
   const pos = loadPosCupUsage();
 
   for (let r = 1; r < values.length; r++) {
@@ -236,9 +237,10 @@ function runDailyDecrement() {
     if (row.every(v => v === '' || v == null)) continue;
 
     const posKind = posLinkOf(colPos != null ? row[colPos] : '', row[colName]);
-    // フタ: POSが持ち帰りを記録し始める前（その期間に記録のある日が1日も無い）は従来の基本量で減らす
+    // フタ: POSが持ち帰りを記録し始める前（その期間に記録のある日が1日も無い）は、下の「売上連動」で減らす
     const lidNotReady = posKind === 'LID' && pos.ok && pos.days.length > 0 && !pos.lidReady;
-    if (posKind && !lidNotReady) {
+    // POSの設定（鍵）がまだ無いときは、カップ・フタも下の従来の減らし方に回す（在庫が止まらないように）
+    if (posKind && posKind !== 'FIXED' && !lidNotReady && pos.configured) {
       if (!pos.ok) continue; // 基本量で減らすと、翌日の実売とで二重に引いてしまう
       // ロゴカップ(Sカップ)は店頭のS・Mに加えて発送セットにも使う（田川さん 2026-10-04）
       const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids : pos.sCups + pos.shipCups;
@@ -264,17 +266,32 @@ function runDailyDecrement() {
       continue; // 夏の自動減算オフ
     }
 
-    // アスクルの発注実績から出した1日あたり（refreshAskulRates が週1で更新）があればそちらを使う。
-    // 1年の平均なので季節・土日の係数は掛けない（掛けると平均より多く減る）
+    // 1日あたりの基準量: アスクルの発注実績（refreshAskulRates が週1で更新）があればそれ、無ければ基本日次量
     const askulDaily = colAskul != null ? num(row[colAskul]) : 0;
-    const dec = askulDaily > 0 ? askulDaily : base * seasonFactor * weekendFactor;
+    const rate = askulDaily > 0 ? askulDaily : base;
+    if (rate <= 0) continue;
+
+    // 売上連動（田川さん 2026-10-04「決まった数ではなく、売上に対して減らしたい」）:
+    //   基準量 × （前日までのマルシェの杯数 ÷ 1日平均の杯数）。売れた日は多く、休みの日は減らない。
+    //   季節・土日の差は実際の売上に出るので、係数は掛けない（掛けると二重になる）。
+    // POS連動「なし」（固定）の品目と、POSの設定がまだ無いときは、従来の 基本量×季節×土日。
+    let dec, kind;
+    if (posKind !== 'FIXED' && pos.ok && pos.avgDailyCups > 0) {
+      dec = rate * pos.salesCups / pos.avgDailyCups;
+      kind = '売上連動(' + pos.label + ' ' + pos.salesCups + '杯/平均' + Math.round(pos.avgDailyCups) + (askulDaily > 0 ? '・アスクル実績' : '') + ')';
+    } else if (posKind !== 'FIXED' && pos.configured) {
+      continue; // POSが一時的に取れない: 今日は減らさず、取れた日にまとめて引く（基本量で減らすと二重になる）
+    } else {
+      dec = askulDaily > 0 ? askulDaily : base * seasonFactor * weekendFactor;
+      kind = askulDaily > 0 ? '自動減算(アスクル実績)' : '自動減算(' + tag + ')';
+    }
     if (dec <= 0) continue;
 
     const before = cur;
     const after = Math.max(0, round2(cur - dec));
     if (after !== before) {
       toSet.push({ row: r + 1, col: colCur + 1, value: after });
-      logChange({ name, before, delta: round2(after - before), after, kind: askulDaily > 0 ? '自動減算(アスクル実績)' : '自動減算(' + tag + ')' });
+      logChange({ name, before, delta: round2(after - before), after, kind: kind });
       updated++;
     }
   }
@@ -306,7 +323,7 @@ function runDailyDecrement() {
 
   const to = str(settings['ALERT_EMAIL_TO']);
   if (to) {
-    sendAlertEmail(to, deficits, pos.ok ? null : pos.error);
+    sendAlertEmail(to, deficits, pos.ok || !pos.configured ? null : pos.error);
   }
 
   return { updated: updated, shortages: deficits, posCups: pos };
@@ -339,7 +356,7 @@ function sendAlertEmail(to, deficits, posError) {
   const lines = [];
   lines.push(`【在庫アラート】${dateStr}`);
   if (posError) {
-    lines.push(`⚠ POSの実売が取れなかったため、カップは今日は減らしていません（明日まとめて引きます）: ${posError}`);
+    lines.push(`⚠ POSの実売が取れなかったため、今日は在庫を減らしていません（取れた日にまとめて引きます）: ${posError}`);
     lines.push('');
   }
   lines.push('下限を下回った品目です:');
@@ -630,6 +647,8 @@ function refreshAskulRates() {
 function posLinkOf(cell, name) {
   const v = str(cell).normalize('NFKC').toUpperCase().replace(/\s/g, '');
   if (v) {
+    // 「なし」「固定」= 売上に連動させず、従来どおり 基本量×季節×土日 で減らす
+    if (v === 'なし' || v === '固定' || v === 'FALSE' || v === 'OFF') return 'FIXED';
     if (v.indexOf('フタ') >= 0 || v.indexOf('蓋') >= 0) return 'LID';
     if (v === 'W' || v.indexOf('ダブル') >= 0) return 'W';
     if (v.indexOf('S') >= 0 || v.indexOf('M') >= 0) return 'SM';
@@ -653,15 +672,15 @@ function loadPosCupUsage() {
   const last = prop('POS_CUPS_LAST_DAY') || jstDay(new Date(Date.now() - 2 * 86400000));
   const url = prop('ORDERING_API_URL');
   const token = prop('ORDERING_API_TOKEN');
-  if (!url || !token) return { ok: false, error: 'ORDERING_API_URL / ORDERING_API_TOKEN 未設定' };
+  if (!url || !token) return { ok: false, configured: false, error: 'ORDERING_API_URL / ORDERING_API_TOKEN 未設定' };
   try {
     const res = UrlFetchApp.fetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'store=marche', {
       headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
     });
-    if (res.getResponseCode() !== 200) return { ok: false, error: 'EC ' + res.getResponseCode() };
+    if (res.getResponseCode() !== 200) return { ok: false, configured: true, error: 'EC ' + res.getResponseCode() };
     const actuals = JSON.parse(res.getContentText()).actuals;
     // 店で絞れていない（2店計の）実売で引くと倍速で減るので使わない
-    if (!actuals || actuals.store !== 'marche') return { ok: false, error: '実売データなし（店舗絞り込み未対応のAPI）' };
+    if (!actuals || actuals.store !== 'marche') return { ok: false, configured: true, error: '実売データなし（店舗絞り込み未対応のAPI）' };
     const days = Object.keys(actuals.days || {}).filter(d => d > last && d < today).sort();
     let sCups = 0, wCups = 0, takeoutCups = 0, shipCups = 0, lidReady = false;
     days.forEach(d => {
@@ -672,10 +691,21 @@ function loadPosCupUsage() {
       shipCups += num(a.shipCups);
       if (a.takeoutTracked) lidReady = true;
     });
+    // 売上連動の物差し: 1日平均の杯数（直近の実売の窓＝約35日、休みの日も含む暦日で割る）
+    let windowCups = 0;
+    Object.keys(actuals.days || {}).forEach(d => {
+      if (d >= today) return;
+      const a = actuals.days[d];
+      windowCups += num(a.sCups) + num(a.wCups) + num(a.shipCups);
+    });
+    const firstDay = actuals.since || Object.keys(actuals.days || {}).sort()[0] || yesterday;
+    const windowDays = Math.max(1, Math.round((new Date(yesterday) - new Date(firstDay)) / 86400000) + 1);
+    const avgDailyCups = windowCups / windowDays;
+    const salesCups = sCups + wCups + shipCups;
     const label = days.length === 0 ? '営業なし' : days.length === 1 ? days[0].slice(5).replace('-', '/') : days[0].slice(5).replace('-', '/') + '〜' + days[days.length - 1].slice(5).replace('-', '/');
-    return { ok: true, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
+    return { ok: true, configured: true, salesCups: salesCups, avgDailyCups: avgDailyCups, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
       lidReady: lidReady, days: days, through: yesterday > last ? yesterday : last, label: label };
   } catch (e) {
-    return { ok: false, error: String(e) };
+    return { ok: false, configured: true, error: String(e) };
   }
 }
