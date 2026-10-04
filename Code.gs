@@ -512,6 +512,26 @@ function recordFoodEvent(body) {
 //    「換算」に 1個（1箱）が在庫の単位でいくつか を入れる（例: エンボス手袋100枚入×在庫単位が枚 → 100）
 // 3. もう一度 refreshAskulRates → Items の「アスクル日次量」が埋まり、毎朝の自動減算がそれを使う
 const ASKUL_SHEET = 'AskulHistory';
+// 品番 → 在庫一覧の商品名・換算（アスクル1個＝在庫の単位でいくつ）の初期値。
+// 2026-10-04 にマルシェ宛て発送1年分（実質 2026-04〜09・21品番）を見て Claude が下書き。
+// AskulHistory で田川さんが直したものが優先（ここは空欄のときだけ使う）。
+// 商品名は候補を並べ、Items にある最初の名前を使う（無ければ紐付けない）。
+const ASKUL_DEFAULT_MAP = {
+  '1947584': { items: ['トイレットペーパー'], factor: 6 },          // 1パック6ロール → ロール
+  '2501695': { items: ['ペーパータオル'], factor: 10 },             // 200枚入×10個 → 束
+  '1251364': { items: ['茶ナプキン'], factor: 10 },                 // 未晒し 100枚入×10袋 → 束（未晒し＝茶と判断）
+  '1251275': { items: ['白ナプキン'], factor: 1000 },               // 白無地 1000枚 → 枚
+  '2797427': { items: ['マスク'], factor: 50 },                     // 1箱50枚 → 枚
+  '8470086': { items: ['エンボス手袋 S', 'エンボス手袋S'], factor: 100 }, // 1箱100枚 → 枚
+  '8470021': { items: ['エンボス手袋 L', 'エンボス手袋L'], factor: 100 },
+  '1964146': { items: ['トイレのお掃除シート', 'トイレの掃除シート'], factor: 3 }, // 1セット3個 → パック
+  '907029': { items: ['おしぼり'], factor: 1200 },                  // 1箱1200枚 → 個
+  '853705': { items: ['ハンドソープ'], factor: 1 },                 // シャボネット1kg → 本
+  '3457018': { items: ['アルコール（除菌）', 'アルコール'], factor: 5 }, // 5L → L
+  '6006271': { items: ['水飲みカップ', '紙コップ'], factor: 100 },  // うがい用紙コップ100個 → 個
+  'H908232': { items: ['フォーム袋 小', 'フォーム袋小', '緩衝フォーム 小'], factor: 50 }, // 150×200 50枚
+  'H908233': { items: ['フォーム袋 大', 'フォーム袋大', '緩衝フォーム 大'], factor: 50 }  // 200×300 50枚
+};
 // この在庫管理はマルシェ店のもの（田川さん 2026-10-04）。本店宛ての発送は数えない
 const ASKUL_STORE = 'マルシェ';
 const ASKUL_WINDOW_DAYS = 365;
@@ -542,6 +562,7 @@ function askulStoreOf(body) {
   const dest = (i >= 0 ? text.slice(i, i + 400) : text).replace(/\s+/g, '');
   if (dest.indexOf('マルシェ') >= 0 || dest.indexOf('本町1-20-14') >= 0) return 'マルシェ';
   if (dest.indexOf('本店') >= 0 || dest.indexOf('南町1-4-1') >= 0) return '本店';
+  if (dest.indexOf('仲町463') >= 0) return '工房';
   return '不明';
 }
 
@@ -551,9 +572,10 @@ function refreshAskulRates() {
   const byCode = {};
   const seen = {};
   let oldest = null;
-  const skipped = { '本店': 0, '不明': 0 };
+  const skipped = { '本店': 0, '工房': 0, '不明': 0 };
   for (let start = 0; start < 2000; start += 100) {
-    const threads = GmailApp.search('from:askul.co.jp subject:"商品発送のお知らせ" newer_than:' + ASKUL_WINDOW_DAYS + 'd', start, 100);
+    // 2026-05頃までは前身の「ソロエルアリーナ」(soloel.com) から同じ書式で届いている
+    const threads = GmailApp.search('from:(askul.co.jp OR soloel.com) subject:"商品発送のお知らせ" newer_than:' + ASKUL_WINDOW_DAYS + 'd', start, 100);
     if (!threads.length) break;
     threads.forEach(function (th) {
       th.getMessages().forEach(function (msg) {
@@ -597,12 +619,25 @@ function refreshAskulRates() {
 
   // 1客あたりの係数 = 発送数量（換算後）÷ 同じ期間のマルシェの客数。
   // 期間は直近1年。POSの記録がそれより短い間（2026-05導入）は、POSに客数がある期間だけで割る（分子も同じ期間に揃える）
+  // Items の商品名（空白・全半角ゆれを無視して引けるように）
+  const itemNameSet = {};
+  (function () {
+    const iv = sheet('Items').getDataRange().getValues();
+    const cn = pickIndex(indexer(iv[0]), ['商品名', '啁E��吁E']);
+    iv.slice(1).forEach(function (r) { const n = str(r[cn]); if (n) itemNameSet[n.normalize('NFKC').replace(/\s/g, '')] = n; });
+  })();
+
   const sales = fetchMarcheSales();
   const win = sales.ok ? customerWindow(sales.customers, jstDay(new Date(Date.now() - 86400000))) : null;
 
   const rows = Object.keys(byCode).sort(function (a, b) { return byCode[b].times - byCode[a].times; }).map(function (code) {
     const c = byCode[code];
-    const p = prev[code] || { item: '', factor: '' };
+    let p = prev[code] || { item: '', factor: '' };
+    if (!p.item && ASKUL_DEFAULT_MAP[code]) {
+      const d = ASKUL_DEFAULT_MAP[code];
+      const hit = d.items.filter(function (n) { return itemNameSet[n.normalize('NFKC').replace(/\s/g, '')]; })[0];
+      if (hit) p = { item: itemNameSet[hit.normalize('NFKC').replace(/\s/g, '')], factor: d.factor };
+    }
     const factor = p.factor === '' || p.factor == null ? 1 : num(p.factor);
     let perCust = '';
     if (p.item && win && win.total > 0) {
@@ -655,7 +690,7 @@ function refreshAskulRates() {
   writeItemsColumn('1客あたり', perCustItem, 10000);
 
   // 不明が多いときは届け先の書式が変わった可能性がある（マルシェ分の取りこぼし）
-  return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days), skippedHonten: skipped['本店'], skippedUnknown: skipped['不明'],
+  return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days), skippedHonten: skipped['本店'], skippedKobo: skipped['工房'], skippedUnknown: skipped['不明'],
     customerWindow: win, salesError: sales.ok ? null : sales.error };
 }
 
