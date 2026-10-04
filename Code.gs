@@ -17,6 +17,9 @@ function doGet(e) {
     if (path === '/ping') {
       return json({ ok: true, data: ping() });
     }
+    if (path === '/food/status') {
+      return json({ ok: true, data: getFoodStatus() });
+    }
     return json({ ok: false, error: 'Unknown path' }, 404);
   } catch (err) {
     return json({ ok: false, error: String(err && err.stack || err) }, 500);
@@ -52,6 +55,18 @@ function doPost(e) {
         results.push({ id: bid, value: bval });
       }
       return json({ ok: true, data: { updated: results.length, items: results } });
+    }
+    if (path === '/food/snapshot') {
+      saveFoodSnapshot(body);
+      return json({ ok: true, data: { saved: true } });
+    }
+    if (path === '/food/pin-check') {
+      checkFoodPin(body.pin);
+      return json({ ok: true, data: { valid: true } });
+    }
+    if (path === '/food/event') {
+      checkFoodPin(body.pin);
+      return json({ ok: true, data: recordFoodEvent(body) });
     }
     if (path === '/decrement/run') {
       const result = runDailyDecrement();
@@ -348,3 +363,77 @@ function ping() {
   return { time: new Date().toISOString() };
 }
 
+
+
+// ===== 食材（需要予測・POS実売連携） =====
+// 食材14品目の在庫計算は gojiemon/woodberrys-demand-forecast（POS実売ベース）が正。
+// ここはその「画面」: 朝バッチの判定結果を預かって見せ、アプリからの記録を woodberrys-ec へ中継する。
+// 鍵はすべてスクリプトプロパティに置く（このリポジトリは公開なのでコードに書かない）:
+//   ZAIKO_SNAPSHOT_SECRET … 朝バッチ（GitHub Actions secrets の同名値）と一致させる
+//   FOOD_PIN             … アプリで記録するときの合言葉（田川さんが決める）
+//   ORDERING_API_URL     … https://<ECのドメイン>/api/ordering/stock
+//   ORDERING_API_TOKEN   … 読み取り用（朝バッチと同じ値）
+//   ORDERING_WRITE_TOKEN … 書き込み用（EC側 Vercel env と同じ値）
+function prop(key) {
+  return str(PropertiesService.getScriptProperties().getProperty(key));
+}
+
+function saveFoodSnapshot(body) {
+  const secret = prop('ZAIKO_SNAPSHOT_SECRET');
+  if (!secret) throw new Error('ZAIKO_SNAPSHOT_SECRET 未設定');
+  if (str(body.secret) !== secret) throw new Error('unauthorized');
+  const snap = body.snapshot;
+  if (!snap || !Array.isArray(snap.items)) throw new Error('snapshot.items が必要です');
+  const text = JSON.stringify(snap);
+  // スクリプトプロパティは1値9KBまで（14品目でおよそ3KB）
+  if (text.length > 9000) throw new Error('snapshot が大きすぎます: ' + text.length);
+  PropertiesService.getScriptProperties().setProperty('FOOD_SNAPSHOT', text);
+}
+
+function checkFoodPin(pin) {
+  const expected = prop('FOOD_PIN');
+  if (!expected) throw new Error('FOOD_PIN 未設定（スクリプトプロパティに合言葉を設定してください）');
+  if (str(pin) !== expected) throw new Error('合言葉が違います');
+}
+
+// 朝の判定結果 + その後の記録（LINE・アプリ両方）。記録の取得に失敗しても判定結果は返す
+function getFoodStatus() {
+  const raw = prop('FOOD_SNAPSHOT');
+  const snapshot = raw ? JSON.parse(raw) : null;
+  let events = null;
+  let eventsError = null;
+  const url = prop('ORDERING_API_URL');
+  const token = prop('ORDERING_API_TOKEN');
+  if (url && token) {
+    try {
+      const res = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+      if (res.getResponseCode() === 200) events = JSON.parse(res.getContentText()).items || null;
+      else eventsError = 'EC ' + res.getResponseCode();
+    } catch (e) {
+      eventsError = String(e);
+    }
+  }
+  return { snapshot: snapshot, events: events, eventsError: eventsError };
+}
+
+function recordFoodEvent(body) {
+  const url = prop('ORDERING_API_URL');
+  const token = prop('ORDERING_WRITE_TOKEN');
+  if (!url || !token) throw new Error('ORDERING_API_URL / ORDERING_WRITE_TOKEN 未設定');
+  const payload = {
+    kind: str(body.kind),
+    item: str(body.item),
+    qty: Number(body.qty),
+    unit: body.unit ? str(body.unit) : null
+  };
+  const res = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+  const out = JSON.parse(res.getContentText() || '{}');
+  if (res.getResponseCode() !== 200 || !out.ok) throw new Error('記録に失敗: ' + (out.error || res.getResponseCode()));
+  return { duplicate: !!out.duplicate, at: out.at };
+}

@@ -22,7 +22,7 @@ GitHub Pages で公開するプレーンHTML/CSS/JSの在庫管理PWAです。�
 - 在庫の ± / 直入力が保存され、一覧が再描画される。
 - 不足タブに `在庫 < 下限` のみ出る。件数がバッジに反映。
 - 「今すぐ自動減算（テスト）」で在庫が減り、`ALERT_EMAIL_TO` が設定されていればメールが届く。
-- 夏シーズンは `夏は自動減算オフ=TRUE` のアイテムが減算されない。
+- 夏シーズンは `夏の自動減算オフ=TRUE` のアイテムが減算されない。
 - ソロエルURL未設定なら検索リンクが開く。
 - Android/Chromeはアイコンバッジ（対応環境）。
 
@@ -32,3 +32,23 @@ GitHub Pages で公開するプレーンHTML/CSS/JSの在庫管理PWAです。�
 
 PWAは簡易なオフライン（Cache First）に対応。Apps ScriptのAPIはWebアプリとして `doGet` / `doPost` を公開し、JSONを返します。
 
+
+## 食材タブ（需要予測・POS実売連携）
+
+食材14品目（ヨーグルト・甘味ベース・果物・チーズ・カップ・スプーン等）は、`gojiemon/woodberrys-demand-forecast` の朝バッチが**POSの実売から消費を引いて**在庫と「今夜発注」を計算している。このタブはその結果を見て、棚卸し・入荷・発注をボタンで記録する画面（LINE返信「在庫 いちご 8」の代わり）。
+
+```
+朝6:15 予測バッチ ──判定結果──▶ GAS(/food/snapshot) ──▶ アプリ「食材」タブ
+アプリのボタン ──▶ GAS(/food/event, 合言葉) ──▶ woodberrys-ec POST /api/ordering/stock ──▶ 翌朝の計算へ
+```
+
+### 設定（1回だけ）
+1. GAS「プロジェクトの設定」→ スクリプトプロパティに追加
+   - `FOOD_PIN` … 記録用の合言葉（アプリで最初に1回だけ聞かれる）
+   - `ZAIKO_SNAPSHOT_SECRET` … 適当な長い文字列（2.と同じ値）
+   - `ORDERING_API_URL` … `https://<ECのドメイン>/api/ordering/stock`
+   - `ORDERING_API_TOKEN` … 予測バッチと同じ読み取り用トークン
+   - `ORDERING_WRITE_TOKEN` … 新しく作る書き込み用トークン（EC側 Vercel env と同じ値）
+2. woodberrys-demand-forecast の Actions secrets に `ZAIKO_GAS_URL`（GASのexec URL）/ `ZAIKO_SNAPSHOT_SECRET` / `ZAIKO_APP_URL`（このアプリのURL）
+3. woodberrys-ec の Vercel env に `ORDERING_WRITE_TOKEN`
+4. GASを「新しいバージョン」で再デプロイ

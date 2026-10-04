@@ -348,6 +348,10 @@
       }
     });
 
+    // 食材タブ
+    document.getElementById('reloadFood')?.addEventListener('click', () => loadFood());
+    document.getElementById('foodContainer')?.addEventListener('click', onFoodClick);
+
     // まとめて登録ボタン
     document.getElementById('saveAllBtn')?.addEventListener('click', () => {
       submitAllChanges();
@@ -522,9 +526,227 @@
       .replaceAll("'", '&#39;');
   }
 
+  // ===== 食材（需要予測・POS実売ベース） =====
+  // 計算は woodberrys-demand-forecast の朝バッチ（POSの実売から消費を引く）。
+  // ここは見る・記録するだけ。記録はGAS経由でLINE返信と同じ在庫イベントに入る。
+  let foodData = null;
+  const FOOD_PIN_KEY = 'zaiko-food-pin';
+  const DOW_JA = ['日', '月', '火', '水', '木', '金', '土'];
+  // 急ぐ順（上から並べる）
+  const FOOD_STATUS = {
+    tonight: { order: 0, label: '今夜発注', cls: 'urgent' },
+    ordernow: { order: 0, label: '今日発注', cls: 'urgent' },
+    early: { order: 1, label: '次の発注日まで持たない', cls: 'warn' },
+    stale: { order: 2, label: '数え直して', cls: 'warn' },
+    nodata: { order: 3, label: '未登録', cls: 'muted' },
+    ok: { order: 4, label: '余裕あり', cls: 'ok' },
+    unused: { order: 5, label: '消費なし', cls: 'muted' },
+    manual: { order: 6, label: '目視で管理', cls: 'muted' },
+  };
+
+  function getPin() {
+    try { return localStorage.getItem(FOOD_PIN_KEY) || ''; } catch (_) { return ''; }
+  }
+  function setPin(v) {
+    try { if (v) localStorage.setItem(FOOD_PIN_KEY, v); else localStorage.removeItem(FOOD_PIN_KEY); } catch (_) {}
+  }
+  async function ensurePin() {
+    let pin = getPin();
+    if (pin) return pin;
+    pin = (prompt('記録用の合言葉を入力してください（この端末に保存されます）') || '').trim();
+    if (!pin) return '';
+    await api('/food/pin-check', { method: 'POST', body: { pin } });
+    setPin(pin);
+    return pin;
+  }
+
+  // ロットの呼び名（「箱(10kg)」→「箱」）。在庫イベントが受け付ける単位に限る
+  function lotWord(it) {
+    const w = String(it.lotLabel || '').replace(/[（(].*$/, '').trim();
+    return ['箱', 'ケース', '袋', '束', '個', '本'].includes(w) ? w : '箱';
+  }
+  // 記録をその品目の基準単位に（demand-forecast の toBaseUnits と同じ換算）
+  function toBase(it, rec) {
+    const u = rec.unit;
+    if (!u || u === 'kg') return rec.qty;
+    if (['箱', 'ケース', '袋', '束'].includes(u)) return rec.qty * it.lot;
+    if (u === '個' || u === '本') return it.unit === 'kg' ? rec.qty * it.lot : rec.qty;
+    return rec.qty;
+  }
+  function fmtAmount(it, v) {
+    if (v == null || !isFinite(v)) return '-';
+    return it.unit === 'kg' ? `${v.toFixed(1)}kg` : `${Math.round(v)}${it.unit}`;
+  }
+  function fmtRec(it, rec) {
+    return rec.unit ? `${rec.qty}${rec.unit}` : `${rec.qty}${it.unit}`;
+  }
+  function fmtWhen(iso) {
+    const d = new Date(iso);
+    return `${d.getMonth() + 1}/${d.getDate()}(${DOW_JA[d.getDay()]}) ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  function fmtDay(ymd) {
+    const d = new Date(ymd + 'T00:00:00');
+    return `${d.getMonth() + 1}/${d.getDate()}(${DOW_JA[d.getDay()]})`;
+  }
+
+  async function loadFood() {
+    const wrap = document.getElementById('foodContainer');
+    try {
+      foodData = await api('/food/status');
+      renderFood();
+    } catch (e) {
+      if (wrap) wrap.innerHTML = `<p>食材の取得に失敗しました: ${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  // 朝の判定より後に記録したもの（LINE・アプリ両方）。明朝の計算までの概算に使う
+  function recordsSince(it, sinceIso) {
+    const ev = foodData && foodData.events && foodData.events[it.name];
+    if (!ev) return { count: null, receives: [], orders: [] };
+    const after = r => r && r.at > sinceIso;
+    return {
+      count: after(ev.lastCount) ? ev.lastCount : null,
+      receives: (ev.receives || []).filter(after),
+      orders: (ev.orders || []).filter(after),
+    };
+  }
+
+  function renderFood() {
+    const wrap = document.getElementById('foodContainer');
+    const meta = document.getElementById('foodMeta');
+    if (!wrap) return;
+    const snap = foodData && foodData.snapshot;
+    if (!snap) {
+      if (meta) meta.textContent = '';
+      wrap.innerHTML = '<p>まだ朝の計算結果が届いていません。明朝の予測LINEのあとに表示されます。</p>';
+      return;
+    }
+    if (meta) {
+      const base = snap.posBased ? 'POSの実売から計算' : '予測から計算（実売データなし）';
+      const evNote = foodData.eventsError ? ` ／ ⚠ 最新の記録を取得できませんでした（${foodData.eventsError}）` : '';
+      meta.textContent = `${fmtWhen(snap.generatedAt)} の計算（${base}）${evNote}`;
+    }
+    const items = [...snap.items].sort((a, b) =>
+      (FOOD_STATUS[a.status]?.order ?? 9) - (FOOD_STATUS[b.status]?.order ?? 9));
+    wrap.innerHTML = items.map(it => renderFoodCard(it, snap)).join('');
+  }
+
+  function renderFoodCard(it, snap) {
+    const st = FOOD_STATUS[it.status] || { label: it.status, cls: 'muted' };
+    const since = recordsSince(it, snap.generatedAt);
+    const lines = [];
+
+    if (it.stock != null) {
+      const days = it.daysLeft != null ? ` ≒ <strong>${it.daysLeft.toFixed(1)}日分</strong>` : '';
+      lines.push(`残り 約${fmtAmount(it, it.stock)}${days}`);
+    }
+    if (it.status === 'tonight' || it.status === 'ordernow') {
+      const arrive = it.arriveDow != null ? `→ ${DOW_JA[it.arriveDow]}着` : '';
+      lines.push(`<span class="food-reco">推奨 ${it.lots}${escapeHtml(it.lotLabel || lotWord(it))} ${arrive}</span>`);
+    }
+    if (it.status === 'early' && it.nextOrderDow != null) {
+      lines.push(`次の発注日（${DOW_JA[it.nextOrderDow]}）の入荷まで持たない見込み`);
+    }
+    if (it.status === 'stale') lines.push(`棚卸しが${it.staleDays}日前で古く、計算できません。数えて記録してください。`);
+    if (it.status === 'nodata') lines.push('まだ一度も数えていません。棚卸しを記録すると明朝から計算されます。');
+    if (it.warn) lines.push(`⚠ ${escapeHtml(it.warn)}`);
+    for (const p of it.pendings || []) lines.push(`📦 入荷待ち ${escapeHtml(p.label)}（${fmtDay(p.eta)}着予定）`);
+
+    // 朝の計算より後の記録 → 明朝反映。棚卸しがあれば概算も出す
+    const recNotes = [];
+    if (since.count) {
+      let est = toBase(it, since.count);
+      for (const r of since.receives) if (r.at > since.count.at) est += toBase(it, r);
+      const d = it.avgDaily > 0 ? ` ≒ ${(est / it.avgDaily).toFixed(1)}日分` : '';
+      recNotes.push(`棚卸し ${fmtRec(it, since.count)}（${fmtWhen(since.count.at)}）→ 概算 ${fmtAmount(it, est)}${d}`);
+    }
+    for (const r of since.receives) recNotes.push(`入荷 ${fmtRec(it, r)}（${fmtWhen(r.at)}）`);
+    for (const r of since.orders) recNotes.push(`発注 ${fmtRec(it, r)}（${fmtWhen(r.at)}）`);
+    const recHtml = recNotes.length
+      ? `<div class="food-recent">📝 朝の計算のあとの記録（明朝の計算に反映）<br>${recNotes.map(escapeHtml).join('<br>')}</div>`
+      : '';
+
+    const lw = lotWord(it);
+    const orderQty = it.lots > 0 ? it.lots : 1;
+    const key = escapeHtml(it.name);
+    return `
+<article class="card food-card food-${st.cls}" aria-label="${key}">
+  <div class="card-header">
+    <h3 class="item-title">${key}</h3>
+    <span class="food-status food-status-${st.cls}">${escapeHtml(st.label)}</span>
+  </div>
+  <div class="item-stock">${lines.join('<br>')}</div>
+  <small class="item-meta">${escapeHtml(it.supplier || '')}${it.method ? '・' + escapeHtml(it.method) : ''}</small>
+  ${recHtml}
+  <div class="food-actions">
+    <button class="btn" data-food="count" data-item="${key}">棚卸し</button>
+    <button class="btn" data-food="receive" data-item="${key}" data-qty="1" data-unit="${escapeHtml(lw)}">入荷</button>
+    <button class="btn" data-food="order" data-item="${key}" data-qty="${orderQty}" data-unit="${escapeHtml(lw)}">発注した</button>
+  </div>
+  <div class="food-form" data-form-for="${key}" hidden></div>
+</article>`;
+  }
+
+  // ボタン → その場に小さな入力欄を出す（数量と単位を確認してから記録）
+  function onFoodClick(e) {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const card = btn.closest('.food-card');
+    if (!card) return;
+    const form = card.querySelector('.food-form');
+    if (btn.dataset.food) {
+      const it = foodData.snapshot.items.find(x => x.name === btn.dataset.item);
+      if (!it) return;
+      const kind = btn.dataset.food;
+      const lw = lotWord(it);
+      const baseLabel = it.unit;
+      const defUnit = btn.dataset.unit || '';
+      const title = { count: '今ある量（棚卸し）', receive: '届いた量（入荷）', order: '発注した量' }[kind];
+      form.innerHTML = `
+        <label>${title}
+          <input class="food-qty" type="number" inputmode="decimal" min="0" step="any" value="${btn.dataset.qty || ''}">
+        </label>
+        <select class="food-unit">
+          <option value="">${escapeHtml(baseLabel)}</option>
+          <option value="${escapeHtml(lw)}" ${defUnit === lw ? 'selected' : ''}>${escapeHtml(it.lotLabel || lw)}</option>
+        </select>
+        <button class="btn primary" data-submit="${kind}">記録</button>
+        <button class="btn" data-cancel="1">やめる</button>`;
+      form.hidden = false;
+      form.querySelector('.food-qty').focus();
+      return;
+    }
+    if (btn.dataset.cancel) { form.hidden = true; form.innerHTML = ''; return; }
+    if (btn.dataset.submit) submitFoodEvent(card, btn);
+  }
+
+  async function submitFoodEvent(card, btn) {
+    const item = card.querySelector('[data-item]').dataset.item;
+    const kind = btn.dataset.submit;
+    const raw = card.querySelector('.food-qty').value.trim();
+    const qty = Number(raw);
+    const unit = card.querySelector('.food-unit').value || null;
+    if (raw === '' || !isFinite(qty) || qty < 0) { alert('数量を入れてください'); return; }
+    if (kind !== 'count' && qty <= 0) { alert('入荷・発注は1以上で入れてください'); return; }
+    btn.disabled = true;
+    try {
+      const pin = await ensurePin();
+      if (!pin) return;
+      const res = await api('/food/event', { method: 'POST', body: { pin, kind, item, qty, unit } });
+      if (res && res.duplicate) alert('同じ内容をついさっき記録済みです（二重にはなりません）');
+      await loadFood();
+    } catch (e) {
+      if (/合言葉/.test(e.message)) setPin('');
+      alert(`記録できませんでした: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // 初期化
   document.addEventListener('DOMContentLoaded', async () => {
     initUI();
+    loadFood();
     try { await loadItems(); } catch (_) {}
   });
 })();

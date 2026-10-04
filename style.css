@@ -183,3 +183,20 @@ main { padding: 12px; }
 @media (min-width: 980px) {
   .cards { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* 食材タブ（需要予測・POS実売ベース） */
+.food-status { font-size: 12px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.food-status-urgent { background: #dc2626; color: #fff; }
+.food-status-warn { background: #f59e0b; color: #fff; }
+.food-status-ok { background: #e7f6ec; color: #15803d; }
+.food-status-muted { background: #f0f0f0; color: #666; }
+.card.food-urgent { background: #fff6f6; border-color: #ffcaca; }
+.card.food-warn { background: #fffbeb; border-color: #fde68a; }
+.food-reco { color: #b91c1c; font-weight: 600; }
+.food-recent { margin-top: 8px; padding: 6px 8px; background: #eff6ff; border-radius: 6px; font-size: 13px; }
+.food-actions { display: flex; gap: 6px; margin-top: 8px; }
+.food-actions .btn { flex: 1 1 0; }
+.food-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.food-form label { display: flex; flex-direction: column; font-size: 12px; gap: 2px; }
+.food-form .food-qty { width: 7em; padding: 8px; font-size: 16px; }
+.food-form select { padding: 8px; font-size: 16px; }
