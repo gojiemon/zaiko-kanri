@@ -244,12 +244,19 @@ function runDailyDecrement() {
     if (posKind && posKind !== 'FIXED' && !lidNotReady && pos.configured) {
       if (!pos.ok) continue; // 基本量で減らすと、翌日の実売とで二重に引いてしまう
       // ロゴカップ(Sカップ)は店頭のS・Mに加えて発送セットにも使う（田川さん 2026-10-04）
-      const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids : pos.sCups + pos.shipCups;
+      const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids
+        : posKind === 'PET' ? pos.namanoseTakeout + pos.wSpecial
+        : posKind === 'NAMA_TO' ? pos.namanoseTakeout
+        : posKind === 'OPP' ? pos.spoonYes
+        : pos.sCups + pos.shipCups;
       if (used <= 0) continue;
       const before = num(row[colCur]);
       const after = Math.max(0, round2(before - used));
       toSet.push({ row: r + 1, col: colCur + 1, value: after });
       const what = posKind === 'W' ? 'W'
+        : posKind === 'PET' ? '生のせ持ち帰り' + pos.namanoseTakeout + '+ギリシャ/生しぼりW' + pos.wSpecial
+        : posKind === 'NAMA_TO' ? '生のせ持ち帰り' + pos.namanoseTakeout
+        : posKind === 'OPP' ? 'スプーンあり' + pos.spoonYes
         : posKind === 'LID' ? '持ち帰り' + pos.takeoutCups + '+発送' + pos.shipCups
         : 'S・M' + pos.sCups + (pos.shipCups ? '+発送' + pos.shipCups : '');
       logChange({ name: row[colName], before, delta: round2(after - before), after, kind: 'POS実売(' + pos.label + ' ' + what + ')' });
@@ -283,7 +290,7 @@ function runDailyDecrement() {
     const coef = perCustAskul > 0 ? perCustAskul : (pos.ok && pos.avgDailyCustomers > 0 ? rate / pos.avgDailyCustomers : 0);
     if (posKind !== 'FIXED' && pos.ok && coef > 0) {
       dec = coef * pos.customers;
-      kind = '客数連動(' + pos.label + ' ' + pos.customers + '客×' + (Math.round(coef * 1000) / 1000) + (perCustAskul > 0 ? '・アスクル実績' : '') + ')';
+      kind = '客数連動(' + pos.label + ' ' + pos.customers + '客×' + Number(coef.toPrecision(2)) + (perCustAskul > 0 ? '・アスクル実績' : '') + ')';
     } else if (posKind !== 'FIXED' && pos.configured) {
       continue; // POSが一時的に取れない: 今日は減らさず、取れた日にまとめて引く（基本量で減らすと二重になる）
     } else {
@@ -528,9 +535,16 @@ const ASKUL_DEFAULT_MAP = {
   '907029': { items: ['おしぼり'], factor: 1200 },                  // 1箱1200枚 → 個
   '853705': { items: ['ハンドソープ'], factor: 1 },                 // シャボネット1kg → 本
   '3457018': { items: ['アルコール（除菌）', 'アルコール'], factor: 5 }, // 5L → L
-  '6006271': { items: ['水飲みカップ', '紙コップ'], factor: 100 },  // うがい用紙コップ100個 → 個
+  '6006271': { items: ['水飲みカップ', '紙コップ'], factor: 1 },    // うがい用紙コップ1袋(100個) → 束（シートの単位が束）
   'H908232': { items: ['フォーム袋 小', 'フォーム袋小', '緩衝フォーム 小'], factor: 50 }, // 150×200 50枚
-  'H908233': { items: ['フォーム袋 大', 'フォーム袋大', '緩衝フォーム 大'], factor: 50 }  // 200×300 50枚
+  'H908233': { items: ['フォーム袋 大', 'フォーム袋大', '緩衝フォーム 大'], factor: 50 }, // 200×300 50枚
+  // 2026-10-04 田川さんの説明から（使い道）。シートの大小は1日の基本量（大2・小14）から Claude が推定
+  'AH99569': { items: ['生のせプラカップ 小'], factor: 25 },        // クリスタルPETカップ9オンス 25個
+  '3615627': { items: ['生のせプラカップ 大'], factor: 50 },        // ニュープロマックス325ml 50個
+  '5781654': { items: ['生のせプラ フタ大'], factor: 50 },          // ニュープロマックス口径88mm用フタ 50個
+  '884837': { items: ['OPP袋'], factor: 100 },                      // はがきサイズ透明袋 100枚（シートに行を足せば紐付く）
+  '618705': { items: ['キッチン泡ハイター', '泡ハイター'], factor: 1 },
+  '5785180': { items: ['漂白剤', 'キッチン漂白剤'], factor: 1 }
 };
 // この在庫管理はマルシェ店のもの（田川さん 2026-10-04）。本店宛ての発送は数えない
 const ASKUL_STORE = 'マルシェ';
@@ -710,6 +724,9 @@ function posLinkOf(cell, name) {
   if (v) {
     // 「なし」「固定」= 売上に連動させず、従来どおり 基本量×季節×土日 で減らす
     if (v === 'なし' || v === '固定' || v === 'FALSE' || v === 'OFF') return 'FIXED';
+    if (v.indexOf('PET') >= 0 || v.indexOf('クリスタル') >= 0) return 'PET';
+    if (v.indexOf('生のせ') >= 0) return 'NAMA_TO';
+    if (v.indexOf('OPP') >= 0 || v.indexOf('スプーン') >= 0) return 'OPP';
     if (v.indexOf('フタ') >= 0 || v.indexOf('蓋') >= 0) return 'LID';
     if (v === 'W' || v.indexOf('ダブル') >= 0) return 'W';
     if (v.indexOf('S') >= 0 || v.indexOf('M') >= 0) return 'SM';
@@ -719,6 +736,12 @@ function posLinkOf(cell, name) {
   if (n === 'Sカップ' || n === 'ロゴカップ') return 'SM';
   if (n === 'Wカップ' || n === 'ダブルカップ') return 'W';
   if (n === 'Sフタ' || n === 'S蓋') return 'LID';
+  // 田川さん 2026-10-04: PETカップ9オンス=生のせ持ち帰り＋ギリシャ/生しぼり入りダブル、
+  // ニュープロマックス325ml=生のせの台の持ち帰りだけ、OPP袋=持ち帰りでスプーンあり。
+  // シートの大小は基本量（大2・小14/日）から推定: 小=PET9オンス、大=325ml（フタ大も325ml用）
+  if (n === '生のせプラカップ小') return 'PET';
+  if (n === '生のせプラカップ大' || n === '生のせプラフタ大') return 'NAMA_TO';
+  if (n === 'OPP袋') return 'OPP';
   return null;
 }
 
@@ -773,7 +796,7 @@ function loadPosCupUsage() {
     const days = Object.keys(dayset).sort();
     let customers = 0;
     days.forEach(d => { customers += num(custDays[d]); });
-    let sCups = 0, wCups = 0, takeoutCups = 0, shipCups = 0, lidReady = false;
+    let sCups = 0, wCups = 0, takeoutCups = 0, shipCups = 0, lidReady = false, namanoseTakeout = 0, wSpecial = 0, spoonYes = 0;
     days.forEach(d => {
       const a = actuals.days[d];
       if (!a) return;
@@ -781,12 +804,16 @@ function loadPosCupUsage() {
       wCups += num(a.wCups);
       takeoutCups += num(a.takeoutCups);
       shipCups += num(a.shipCups);
+      namanoseTakeout += num(a.namanoseTakeout);
+      wSpecial += num(a.wSpecial);
+      spoonYes += num(a.spoonYes);
       if (a.takeoutTracked) lidReady = true;
     });
     // 係数の物差し: 1年（POSの記録がそれより短ければ記録のある期間）の1日平均の客数
     const win = customerWindow(custDays, yesterday);
     const label = days.length === 0 ? '営業なし' : days.length === 1 ? days[0].slice(5).replace('-', '/') : days[0].slice(5).replace('-', '/') + '〜' + days[days.length - 1].slice(5).replace('-', '/');
     return { ok: true, configured: true, customers: customers, avgDailyCustomers: win.avg, customerWindow: win, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
+      namanoseTakeout: namanoseTakeout, wSpecial: wSpecial, spoonYes: spoonYes,
       lidReady: lidReady, days: days, through: yesterday > last ? yesterday : last, label: label };
   } catch (e) {
     return { ok: false, configured: true, error: String(e) };
