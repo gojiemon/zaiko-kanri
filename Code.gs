@@ -240,12 +240,15 @@ function runDailyDecrement() {
     const lidNotReady = posKind === 'LID' && pos.ok && pos.days.length > 0 && !pos.lidReady;
     if (posKind && !lidNotReady) {
       if (!pos.ok) continue; // 基本量で減らすと、翌日の実売とで二重に引いてしまう
-      const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids : pos.sCups;
+      // ロゴカップ(Sカップ)は店頭のS・Mに加えて発送セットにも使う（田川さん 2026-10-04）
+      const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids : pos.sCups + pos.shipCups;
       if (used <= 0) continue;
       const before = num(row[colCur]);
       const after = Math.max(0, round2(before - used));
       toSet.push({ row: r + 1, col: colCur + 1, value: after });
-      const what = posKind === 'W' ? 'W' : posKind === 'LID' ? '持ち帰り' + pos.takeoutCups + '+発送' + pos.shipCups : 'S・M';
+      const what = posKind === 'W' ? 'W'
+        : posKind === 'LID' ? '持ち帰り' + pos.takeoutCups + '+発送' + pos.shipCups
+        : 'S・M' + pos.sCups + (pos.shipCups ? '+発送' + pos.shipCups : '');
       logChange({ name: row[colName], before, delta: round2(after - before), after, kind: 'POS実売(' + pos.label + ' ' + what + ')' });
       updated++;
       continue;
@@ -615,7 +618,7 @@ function refreshAskulRates() {
 
 
 // ===== カップはPOSの実売で減らす（マルシェ） =====
-// 田川さん 2026-10-04: フロヨのS・Mは全部ロゴカップ、ダブル(W)は大きいカップを使う。
+// 田川さん 2026-10-04: フロヨのS・Mは全部ロゴカップ、ダブル(W)は大きいカップを使う。発送セットもロゴカップ。
 // （シート上の名前: ロゴカップ＝「Sカップ」、大きいカップ＝「Wカップ」または「ダブルカップ」）
 // → Items の「POS連動」列に「S・M」か「W」を入れた品目は、基本日次量ではなく
 //    前日までのマルシェのPOS実売の個数で減らす（列が無ければ商品名 Sカップ/ロゴカップ/Wカップ/ダブルカップ で判定）。

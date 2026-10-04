@@ -520,7 +520,7 @@
   </div>
   <div class="item-stock">在庫 <strong>${fmt2(cur)}</strong>${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}${isChanged ? ` <span class="pending-value">→ ${fmt2(displayValue)}</span>` : ''}</div>
   <small class="item-meta">${f.posLink
-    ? (f.posLink === 'LID' ? '減り方: POS実売（マルシェの持ち帰りS・M＋発送セットの数）' : `減り方: POS実売（マルシェの${f.posLink}の数）`)
+    ? (f.posLink === 'LID' ? '減り方: POS実売（マルシェの持ち帰りS・M＋発送セットの数）' : (f.posLink === 'S・M' ? '減り方: POS実売（マルシェのS・M＋発送セットの数）' : `減り方: POS実売（マルシェの${f.posLink}の数）`))
     : f.askulDaily > 0
     ? `減り方: アスクル実績 1日${f.askulDaily}${escapeHtml(unit)}`
     : (f.baseDaily > 0 ? `減り方: 基本量 1日${f.baseDaily}${escapeHtml(unit)}×季節・土日` : '')}</small>
