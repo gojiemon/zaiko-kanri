@@ -225,7 +225,7 @@
     const nm = String(name).normalize('NFKC').replace(/\s/g, '');
     const posLink = posCell
       ? (posCell === 'W' || posCell.includes('ダブル') ? 'W' : (/[SM]/.test(posCell) ? 'S・M' : ''))
-      : (nm === 'Sカップ' || nm === 'ロゴカップ' ? 'S・M' : nm === 'Wカップ' ? 'W' : '');
+      : (nm === 'Sカップ' || nm === 'ロゴカップ' ? 'S・M' : (nm === 'Wカップ' || nm === 'ダブルカップ') ? 'W' : '');
     return { id, name, unit, cur, min, category, soloel, askulDaily, baseDaily, posLink };
   }
 

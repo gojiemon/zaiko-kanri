@@ -613,8 +613,9 @@ function refreshAskulRates() {
 
 // ===== カップはPOSの実売で減らす（マルシェ） =====
 // 田川さん 2026-10-04: フロヨのS・Mは全部ロゴカップ、ダブル(W)は大きいカップを使う。
+// （シート上の名前: ロゴカップ＝「Sカップ」、大きいカップ＝「Wカップ」または「ダブルカップ」）
 // → Items の「POS連動」列に「S・M」か「W」を入れた品目は、基本日次量ではなく
-//    前日までのマルシェのPOS実売の個数で減らす（列が無ければ商品名 Sカップ/ロゴカップ/Wカップ で判定）。
+//    前日までのマルシェのPOS実売の個数で減らす（列が無ければ商品名 Sカップ/ロゴカップ/Wカップ/ダブルカップ で判定）。
 // 実売は woodberrys-ec の在庫API（?store=marche）の actuals から取る。S・M=sCups、W=wCups。
 // 引いた営業日はスクリプトプロパティ POS_CUPS_LAST_DAY に記録し、
 // トリガーが止まった日があっても次の実行でその分までまとめて引く（直近35日まで）。
@@ -627,7 +628,7 @@ function posLinkOf(cell, name) {
   }
   const n = str(name).normalize('NFKC').replace(/\s/g, '');
   if (n === 'Sカップ' || n === 'ロゴカップ') return 'SM';
-  if (n === 'Wカップ') return 'W';
+  if (n === 'Wカップ' || n === 'ダブルカップ') return 'W';
   return null;
 }
 
