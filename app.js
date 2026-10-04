@@ -381,7 +381,8 @@
     if (!btn) return;
     const action = btn.getAttribute('data-action');
     const id = btn.getAttribute('data-id');
-    const input = document.querySelector(`input[data-id="${id}"]`);
+    // 同じ品目が「今日の不足」と「在庫一覧」の両方にあるので、押したカード内の入力欄を使う
+    const input = btn.closest('.card')?.querySelector('input.qty-input');
     if (!id || !input) return;
     const current = Number(input.value) || 0;
     if (action === 'dec') {
@@ -415,6 +416,9 @@
       alert('数値を入力してください');
       return;
     }
+    // タップして離れただけ（値が変わっていない）なら保留にしない。
+    // 古い値で「まとめて登録」すると自動減算後の在庫を上書きしてしまうため
+    if (!pendingChanges.has(String(id)) && Number(input.defaultValue) === v) return;
     addPending(id, v);
     input.value = fmt2(v);
     markChanged(input);
