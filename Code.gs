@@ -214,6 +214,7 @@ function runDailyDecrement() {
   const colSkipSummer = pickIndex(idx, ['夏は自動減算オフ', '夏の自動減算オフ', '夏�E自動減算オチE']);
   const colAskul = pickIndex(idx, ['アスクル日次量']);
   const colPos = pickIndex(idx, ['POS連動']);
+  const colPerCust = pickIndex(idx, ['1客あたり']);
 
   if ([colId, colName, colCur, colBase].some(v => v == null)) {
     throw new Error('必要な列が不足しています（ID/商品名/現在庫数/基本日次量）');
@@ -268,17 +269,21 @@ function runDailyDecrement() {
 
     // 1日あたりの基準量: アスクルの発注実績（refreshAskulRates が週1で更新）があればそれ、無ければ基本日次量
     const askulDaily = colAskul != null ? num(row[colAskul]) : 0;
+    const perCustAskul = colPerCust != null ? num(row[colPerCust]) : 0;
     const rate = askulDaily > 0 ? askulDaily : base;
-    if (rate <= 0) continue;
+    if (rate <= 0 && perCustAskul <= 0) continue;
 
-    // 売上連動（田川さん 2026-10-04「決まった数ではなく、売上に対して減らしたい」）:
-    //   基準量 × （前日までのマルシェの杯数 ÷ 1日平均の杯数）。売れた日は多く、休みの日は減らない。
-    //   季節・土日の差は実際の売上に出るので、係数は掛けない（掛けると二重になる）。
+    // 客数連動（田川さん 2026-10-04「お客さんの数とトイレットペーパー等の減りは連動している。
+    //   1年間の売上との兼ね合いから係数を作って減らしたい」）:
+    //   減る量 = 前日までのマルシェの客数（会計件数） × 1客あたりの係数。休みの日は減らない。
+    //   係数: アスクル品目は「1年の発送数量 ÷ 同じ期間の客数」（refreshAskulRates が計算して「1客あたり」列へ）。
+    //         それ以外は「基本日次量 ÷ 1年の1日平均客数」。季節・土日の差は客数に出るので倍率は掛けない。
     // POS連動「なし」（固定）の品目と、POSの設定がまだ無いときは、従来の 基本量×季節×土日。
     let dec, kind;
-    if (posKind !== 'FIXED' && pos.ok && pos.avgDailyCups > 0) {
-      dec = rate * pos.salesCups / pos.avgDailyCups;
-      kind = '売上連動(' + pos.label + ' ' + pos.salesCups + '杯/平均' + Math.round(pos.avgDailyCups) + (askulDaily > 0 ? '・アスクル実績' : '') + ')';
+    const coef = perCustAskul > 0 ? perCustAskul : (pos.ok && pos.avgDailyCustomers > 0 ? rate / pos.avgDailyCustomers : 0);
+    if (posKind !== 'FIXED' && pos.ok && coef > 0) {
+      dec = coef * pos.customers;
+      kind = '客数連動(' + pos.label + ' ' + pos.customers + '客×' + (Math.round(coef * 1000) / 1000) + (perCustAskul > 0 ? '・アスクル実績' : '') + ')';
     } else if (posKind !== 'FIXED' && pos.configured) {
       continue; // POSが一時的に取れない: 今日は減らさず、取れた日にまとめて引く（基本量で減らすと二重になる）
     } else {
@@ -511,7 +516,7 @@ const ASKUL_SHEET = 'AskulHistory';
 const ASKUL_STORE = 'マルシェ';
 const ASKUL_WINDOW_DAYS = 365;
 const ASKUL_HEADERS = ['品番', '商品名（アスクル）', '期間内の数量', '発送回数', '最初の発送', '最後の発送',
-  '在庫管理の商品名', '換算（1個＝在庫いくつ）', '1日あたり（換算後）'];
+  '在庫管理の商品名', '換算（1個＝在庫いくつ）', '1日あたり（換算後）', '1客あたり（換算後）'];
 
 // 発送メール本文から [{code, name, qty}] を取り出す（「お申込番号 商品名 数量」の表。メーカー直送は「商品番号」）
 function parseAskulShipment(body) {
@@ -562,8 +567,9 @@ function refreshAskulRates() {
         const store = askulStoreOf(body);
         if (store !== ASKUL_STORE) { skipped[store] = (skipped[store] || 0) + 1; return; }
         parseAskulShipment(body).forEach(function (it) {
-          const c = (byCode[it.code] = byCode[it.code] || { name: it.name, qty: 0, times: 0, first: at, last: at });
+          const c = (byCode[it.code] = byCode[it.code] || { name: it.name, qty: 0, times: 0, first: at, last: at, ships: [] });
           c.qty += it.qty;
+          c.ships.push({ day: jstDay(at), qty: it.qty });
           c.times += 1;
           if (at < c.first) c.first = at;
           if (at > c.last) { c.last = at; c.name = it.name; }
@@ -586,15 +592,26 @@ function refreshAskulRates() {
   }
   Object.keys(prev).forEach(function (code) {
     // 1年以内に発送がなくなった品番も、紐付けが入っていれば行を残す（数量0＝もう買っていない）
-    if (!byCode[code] && prev[code].item) byCode[code] = { name: str(old.find(function (r) { return str(r[0]) === code; })[1]), qty: 0, times: 0, first: null, last: null };
+    if (!byCode[code] && prev[code].item) byCode[code] = { name: str(old.find(function (r) { return str(r[0]) === code; })[1]), qty: 0, times: 0, first: null, last: null, ships: [] };
   });
+
+  // 1客あたりの係数 = 発送数量（換算後）÷ 同じ期間のマルシェの客数。
+  // 期間は直近1年。POSの記録がそれより短い間（2026-05導入）は、POSに客数がある期間だけで割る（分子も同じ期間に揃える）
+  const sales = fetchMarcheSales();
+  const win = sales.ok ? customerWindow(sales.customers, jstDay(new Date(Date.now() - 86400000))) : null;
 
   const rows = Object.keys(byCode).sort(function (a, b) { return byCode[b].times - byCode[a].times; }).map(function (code) {
     const c = byCode[code];
     const p = prev[code] || { item: '', factor: '' };
     const factor = p.factor === '' || p.factor == null ? 1 : num(p.factor);
+    let perCust = '';
+    if (p.item && win && win.total > 0) {
+      const inWin = c.ships.filter(function (x) { return x.day >= win.from && x.day <= win.to; })
+        .reduce(function (a, x) { return a + x.qty; }, 0);
+      perCust = Math.round(inWin * factor / win.total * 10000) / 10000;
+    }
     return [code, c.name, c.qty, c.times, c.first || '', c.last || '', p.item, p.factor === '' || p.factor == null ? '' : p.factor,
-      p.item ? round2(c.qty * factor / days) : ''];
+      p.item ? round2(c.qty * factor / days) : '', perCust];
   });
   sh.clearContents();
   sh.getRange(1, 1, 1, ASKUL_HEADERS.length).setValues([ASKUL_HEADERS]);
@@ -615,22 +632,31 @@ function refreshAskulRates() {
 
   // Items に「アスクル日次量」を書く（紐付けのない品目は空欄＝従来の基本日次量×係数のまま）
   const perItem = {};
+  const perCustItem = {};
   rows.forEach(function (r) {
     if (r[6] && r[8] !== '') perItem[r[6]] = (perItem[r[6]] || 0) + Number(r[8]);
+    if (r[6] && r[9] !== '') perCustItem[r[6]] = (perCustItem[r[6]] || 0) + Number(r[9]);
   });
-  let colAskul = pickIndex(idx, ['アスクル日次量']);
-  if (colAskul == null) {
-    colAskul = itemValues[0].length;
-    itemsSh.getRange(1, colAskul + 1).setValue('アスクル日次量');
+  // Items に「アスクル日次量」（参考）と「1客あたり」（毎朝の減算に使う係数）を書く。紐付けのない品目は空欄
+  function writeItemsColumn(header, values, digits) {
+    const hdr = itemsSh.getRange(1, 1, 1, itemsSh.getLastColumn()).getValues()[0];
+    let col = indexer(hdr)[header];
+    if (col == null) {
+      col = hdr.length;
+      itemsSh.getRange(1, col + 1).setValue(header);
+    }
+    const out = itemValues.slice(1).map(function (r) {
+      const v = values[str(r[colName])];
+      return [v != null ? Math.round(v * digits) / digits : ''];
+    });
+    if (out.length) itemsSh.getRange(2, col + 1, out.length, 1).setValues(out);
   }
-  const out = itemValues.slice(1).map(function (r) {
-    const v = perItem[str(r[colName])];
-    return [v != null ? round2(v) : ''];
-  });
-  if (out.length) itemsSh.getRange(2, colAskul + 1, out.length, 1).setValues(out);
+  writeItemsColumn('アスクル日次量', perItem, 100);
+  writeItemsColumn('1客あたり', perCustItem, 10000);
 
   // 不明が多いときは届け先の書式が変わった可能性がある（マルシェ分の取りこぼし）
-  return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days), skippedHonten: skipped['本店'], skippedUnknown: skipped['不明'] };
+  return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days), skippedHonten: skipped['本店'], skippedUnknown: skipped['不明'],
+    customerWindow: win, salesError: sales.ok ? null : sales.error };
 }
 
 
@@ -665,11 +691,8 @@ function jstDay(date) {
   return Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy-MM-dd');
 }
 
-function loadPosCupUsage() {
-  const today = jstDay(new Date());
-  const yesterday = jstDay(new Date(Date.now() - 86400000));
-  // 初回は前日分だけ引く（過去の分は棚卸し済みの在庫に含まれている前提）
-  const last = prop('POS_CUPS_LAST_DAY') || jstDay(new Date(Date.now() - 2 * 86400000));
+// マルシェのPOS実売と客数を在庫APIから取る（在庫の減算・係数づくりの両方で使う）
+function fetchMarcheSales() {
   const url = prop('ORDERING_API_URL');
   const token = prop('ORDERING_API_TOKEN');
   if (!url || !token) return { ok: false, configured: false, error: 'ORDERING_API_URL / ORDERING_API_TOKEN 未設定' };
@@ -678,32 +701,57 @@ function loadPosCupUsage() {
       headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
     });
     if (res.getResponseCode() !== 200) return { ok: false, configured: true, error: 'EC ' + res.getResponseCode() };
-    const actuals = JSON.parse(res.getContentText()).actuals;
+    const body = JSON.parse(res.getContentText());
     // 店で絞れていない（2店計の）実売で引くと倍速で減るので使わない
-    if (!actuals || actuals.store !== 'marche') return { ok: false, configured: true, error: '実売データなし（店舗絞り込み未対応のAPI）' };
-    const days = Object.keys(actuals.days || {}).filter(d => d > last && d < today).sort();
+    if (!body.actuals || body.actuals.store !== 'marche') return { ok: false, configured: true, error: '実売データなし（店舗絞り込み未対応のAPI）' };
+    if (!body.customers || body.customers.store !== 'marche') return { ok: false, configured: true, error: '客数データなし（客数に未対応のAPI）' };
+    return { ok: true, configured: true, actuals: body.actuals, customers: body.customers.days || {} };
+  } catch (e) {
+    return { ok: false, configured: true, error: String(e) };
+  }
+}
+
+// 客数の「1日平均」と、その期間（係数の物差し）。直近365日（POSの記録がそれより短ければ記録の初日から）
+function customerWindow(custDays, yesterday) {
+  const yearAgo = jstDay(new Date(new Date(yesterday + 'T00:00:00+09:00').getTime() - 364 * 86400000));
+  const keys = Object.keys(custDays).filter(d => d >= yearAgo && d <= yesterday).sort();
+  if (!keys.length) return { from: null, to: yesterday, total: 0, days: 0, avg: 0 };
+  const from = keys[0];
+  let total = 0;
+  keys.forEach(d => { total += num(custDays[d]); });
+  const days = Math.max(1, Math.round((new Date(yesterday) - new Date(from)) / 86400000) + 1); // 休みの日も含む暦日
+  return { from: from, to: yesterday, total: total, days: days, avg: total / days };
+}
+
+function loadPosCupUsage() {
+  const today = jstDay(new Date());
+  const yesterday = jstDay(new Date(Date.now() - 86400000));
+  // 初回は前日分だけ引く（過去の分は棚卸し済みの在庫に含まれている前提）
+  const last = prop('POS_CUPS_LAST_DAY') || jstDay(new Date(Date.now() - 2 * 86400000));
+  const sales = fetchMarcheSales();
+  if (!sales.ok) return sales;
+  try {
+    const actuals = sales.actuals;
+    const custDays = sales.customers;
+    const dayset = {};
+    Object.keys(actuals.days || {}).concat(Object.keys(custDays)).forEach(d => { if (d > last && d < today) dayset[d] = true; });
+    const days = Object.keys(dayset).sort();
+    let customers = 0;
+    days.forEach(d => { customers += num(custDays[d]); });
     let sCups = 0, wCups = 0, takeoutCups = 0, shipCups = 0, lidReady = false;
     days.forEach(d => {
       const a = actuals.days[d];
+      if (!a) return;
       sCups += num(a.sCups);
       wCups += num(a.wCups);
       takeoutCups += num(a.takeoutCups);
       shipCups += num(a.shipCups);
       if (a.takeoutTracked) lidReady = true;
     });
-    // 売上連動の物差し: 1日平均の杯数（直近の実売の窓＝約35日、休みの日も含む暦日で割る）
-    let windowCups = 0;
-    Object.keys(actuals.days || {}).forEach(d => {
-      if (d >= today) return;
-      const a = actuals.days[d];
-      windowCups += num(a.sCups) + num(a.wCups) + num(a.shipCups);
-    });
-    const firstDay = actuals.since || Object.keys(actuals.days || {}).sort()[0] || yesterday;
-    const windowDays = Math.max(1, Math.round((new Date(yesterday) - new Date(firstDay)) / 86400000) + 1);
-    const avgDailyCups = windowCups / windowDays;
-    const salesCups = sCups + wCups + shipCups;
+    // 係数の物差し: 1年（POSの記録がそれより短ければ記録のある期間）の1日平均の客数
+    const win = customerWindow(custDays, yesterday);
     const label = days.length === 0 ? '営業なし' : days.length === 1 ? days[0].slice(5).replace('-', '/') : days[0].slice(5).replace('-', '/') + '〜' + days[days.length - 1].slice(5).replace('-', '/');
-    return { ok: true, configured: true, salesCups: salesCups, avgDailyCups: avgDailyCups, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
+    return { ok: true, configured: true, customers: customers, avgDailyCustomers: win.avg, customerWindow: win, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
       lidReady: lidReady, days: days, through: yesterday > last ? yesterday : last, label: label };
   } catch (e) {
     return { ok: false, configured: true, error: String(e) };

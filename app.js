@@ -219,6 +219,7 @@
       } catch (_) {}
     }
     const askulDaily = Number(firstField(it, ['アスクル日次量'])) || 0;
+    const perCust = Number(firstField(it, ['1客あたり'])) || 0;
     const baseDaily = Number(firstField(it, ['基本日次量'])) || 0;
     // GASの posLinkOf と同じ判定（POS連動列 → 無ければ商品名）
     const posCell = String(firstField(it, ['POS連動']) || '').normalize('NFKC').toUpperCase().replace(/\s/g, '');
@@ -229,7 +230,7 @@
       : (nm === 'Sカップ' || nm === 'ロゴカップ' ? 'S・M' : (nm === 'Wカップ' || nm === 'ダブルカップ') ? 'W'
         : (nm === 'Sフタ' || nm === 'S蓋') ? 'LID' : '');
     const posFixed = ['なし', '固定', 'FALSE', 'OFF'].includes(posCell);
-    return { id, name, unit, cur, min, category, soloel, askulDaily, baseDaily, posLink: posFixed ? '' : posLink, posFixed };
+    return { id, name, unit, cur, min, category, soloel, askulDaily, perCust, baseDaily, posLink: posFixed ? '' : posLink, posFixed };
   }
 
   // リンク決定（URL未設定時は検索）
@@ -524,9 +525,11 @@
     ? (f.posLink === 'LID' ? '減り方: POS実売（マルシェの持ち帰りS・M＋発送セットの数）' : (f.posLink === 'S・M' ? '減り方: POS実売（マルシェのS・M＋発送セットの数）' : `減り方: POS実売（マルシェの${f.posLink}の数）`))
     : f.posFixed
     ? (f.baseDaily > 0 ? `減り方: 固定 1日${f.baseDaily}${escapeHtml(unit)}×季節・土日` : '')
-    : f.askulDaily > 0
-    ? `減り方: 売上連動（平均的な日に${f.askulDaily}${escapeHtml(unit)}・アスクル実績）`
-    : (f.baseDaily > 0 ? `減り方: 売上連動（平均的な日に${f.baseDaily}${escapeHtml(unit)}）` : '')}</small>
+    : f.perCust > 0
+    ? `減り方: 客数×1客あたり${f.perCust}${escapeHtml(unit)}（アスクル1年の実績）`
+    : (f.askulDaily || f.baseDaily) > 0
+    ? `減り方: 客数連動（平均的な日に${f.askulDaily || f.baseDaily}${escapeHtml(unit)}）`
+    : ''}</small>
   ${restockBtn}
   <div class="controls">
     <div class="stepper">
