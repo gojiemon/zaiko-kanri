@@ -236,14 +236,17 @@ function runDailyDecrement() {
     if (row.every(v => v === '' || v == null)) continue;
 
     const posKind = posLinkOf(colPos != null ? row[colPos] : '', row[colName]);
-    if (posKind) {
+    // フタ: POSが持ち帰りを記録し始める前（その期間に記録のある日が1日も無い）は従来の基本量で減らす
+    const lidNotReady = posKind === 'LID' && pos.ok && pos.days.length > 0 && !pos.lidReady;
+    if (posKind && !lidNotReady) {
       if (!pos.ok) continue; // 基本量で減らすと、翌日の実売とで二重に引いてしまう
-      const used = posKind === 'W' ? pos.wCups : pos.sCups;
+      const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids : pos.sCups;
       if (used <= 0) continue;
       const before = num(row[colCur]);
       const after = Math.max(0, round2(before - used));
       toSet.push({ row: r + 1, col: colCur + 1, value: after });
-      logChange({ name: row[colName], before, delta: round2(after - before), after, kind: 'POS実売(' + pos.label + ' ' + (posKind === 'W' ? 'W' : 'S・M') + ')' });
+      const what = posKind === 'W' ? 'W' : posKind === 'LID' ? '持ち帰り' + pos.takeoutCups + '+発送' + pos.shipCups : 'S・M';
+      logChange({ name: row[colName], before, delta: round2(after - before), after, kind: 'POS実売(' + pos.label + ' ' + what + ')' });
       updated++;
       continue;
     }
@@ -617,11 +620,14 @@ function refreshAskulRates() {
 // → Items の「POS連動」列に「S・M」か「W」を入れた品目は、基本日次量ではなく
 //    前日までのマルシェのPOS実売の個数で減らす（列が無ければ商品名 Sカップ/ロゴカップ/Wカップ/ダブルカップ で判定）。
 // 実売は woodberrys-ec の在庫API（?store=marche）の actuals から取る。S・M=sCups、W=wCups。
+// フタ（Sフタ / POS連動「フタ」）: 田川さん「フタは持ち帰りと発送にしか使わない」→ 持ち帰りS・M＋発送セットのカップ数。
+//   POSが持ち帰りを保存するのは 2026-10-04 の変更以降。記録のある日が無い間は従来の基本量で減らす。
 // 引いた営業日はスクリプトプロパティ POS_CUPS_LAST_DAY に記録し、
 // トリガーが止まった日があっても次の実行でその分までまとめて引く（直近35日まで）。
 function posLinkOf(cell, name) {
   const v = str(cell).normalize('NFKC').toUpperCase().replace(/\s/g, '');
   if (v) {
+    if (v.indexOf('フタ') >= 0 || v.indexOf('蓋') >= 0) return 'LID';
     if (v === 'W' || v.indexOf('ダブル') >= 0) return 'W';
     if (v.indexOf('S') >= 0 || v.indexOf('M') >= 0) return 'SM';
     return null; // 「なし」等
@@ -629,6 +635,7 @@ function posLinkOf(cell, name) {
   const n = str(name).normalize('NFKC').replace(/\s/g, '');
   if (n === 'Sカップ' || n === 'ロゴカップ') return 'SM';
   if (n === 'Wカップ' || n === 'ダブルカップ') return 'W';
+  if (n === 'Sフタ' || n === 'S蓋') return 'LID';
   return null;
 }
 
@@ -653,10 +660,18 @@ function loadPosCupUsage() {
     // 店で絞れていない（2店計の）実売で引くと倍速で減るので使わない
     if (!actuals || actuals.store !== 'marche') return { ok: false, error: '実売データなし（店舗絞り込み未対応のAPI）' };
     const days = Object.keys(actuals.days || {}).filter(d => d > last && d < today).sort();
-    let sCups = 0, wCups = 0;
-    days.forEach(d => { sCups += num(actuals.days[d].sCups); wCups += num(actuals.days[d].wCups); });
+    let sCups = 0, wCups = 0, takeoutCups = 0, shipCups = 0, lidReady = false;
+    days.forEach(d => {
+      const a = actuals.days[d];
+      sCups += num(a.sCups);
+      wCups += num(a.wCups);
+      takeoutCups += num(a.takeoutCups);
+      shipCups += num(a.shipCups);
+      if (a.takeoutTracked) lidReady = true;
+    });
     const label = days.length === 0 ? '営業なし' : days.length === 1 ? days[0].slice(5).replace('-', '/') : days[0].slice(5).replace('-', '/') + '〜' + days[days.length - 1].slice(5).replace('-', '/');
-    return { ok: true, sCups: sCups, wCups: wCups, days: days, through: yesterday > last ? yesterday : last, label: label };
+    return { ok: true, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
+      lidReady: lidReady, days: days, through: yesterday > last ? yesterday : last, label: label };
   } catch (e) {
     return { ok: false, error: String(e) };
   }

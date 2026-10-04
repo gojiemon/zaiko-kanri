@@ -75,3 +75,5 @@ PWAは簡易なオフライン（Cache First）に対応。Apps ScriptのAPIはW
 - 実売は woodberrys-ec の在庫API（`?store=marche`）から。GASのスクリプトプロパティ `ORDERING_API_URL` / `ORDERING_API_TOKEN` が必要（食材タブと同じ）
 - どの営業日まで引いたかを `POS_CUPS_LAST_DAY` に記録。トリガーが止まった日があっても、次の実行でまとめて引く
 - 実売が取れない日はカップだけ減らさず（基本量で減らすと翌日と二重になる）、アラートメールの先頭で知らせる
+- **フタ（Sフタ）**: フタは持ち帰りと発送にしか使わない（田川さん）→ 持ち帰りの S・M ＋ 発送セット（発送N個セット・母の日/父の日・セレクトN個入り）のカップ数で減らす。商品名 `Sフタ` か「POS連動」列に `フタ`
+  - 持ち帰りはPOSが 2026-10-04 の変更（woodberrys-pos `claude/sleepy-planck-v0zt8x`）から記録する。それが本番に入るまでは従来の基本量で減る
