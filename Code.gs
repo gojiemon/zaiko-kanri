@@ -213,6 +213,7 @@ function runDailyDecrement() {
   const colMin = pickIndex(idx, ['最低在庫数']);
   const colSkipSummer = pickIndex(idx, ['夏は自動減算オフ', '夏の自動減算オフ', '夏�E自動減算オチE']);
   const colAskul = pickIndex(idx, ['アスクル日次量']);
+  const colPos = pickIndex(idx, ['POS連動']);
 
   if ([colId, colName, colCur, colBase].some(v => v == null)) {
     throw new Error('必要な列が不足しています（ID/商品名/現在庫数/基本日次量）');
@@ -227,10 +228,25 @@ function runDailyDecrement() {
 
   let updated = 0;
   const toSet = [];
+  // カップはPOSの実売（マルシェ）で減らす。取れなければカップだけ今日は減らさず、翌日まとめて引く
+  const pos = loadPosCupUsage();
 
   for (let r = 1; r < values.length; r++) {
     const row = values[r];
     if (row.every(v => v === '' || v == null)) continue;
+
+    const posKind = posLinkOf(colPos != null ? row[colPos] : '', row[colName]);
+    if (posKind) {
+      if (!pos.ok) continue; // 基本量で減らすと、翌日の実売とで二重に引いてしまう
+      const used = posKind === 'W' ? pos.wCups : pos.sCups;
+      if (used <= 0) continue;
+      const before = num(row[colCur]);
+      const after = Math.max(0, round2(before - used));
+      toSet.push({ row: r + 1, col: colCur + 1, value: after });
+      logChange({ name: row[colName], before, delta: round2(after - before), after, kind: 'POS実売(' + pos.label + ' ' + (posKind === 'W' ? 'W' : 'S・M') + ')' });
+      updated++;
+      continue;
+    }
 
     const name = row[colName];
     const base = num(row[colBase]);
@@ -259,6 +275,8 @@ function runDailyDecrement() {
 
   // バッチで反映
   toSet.forEach(x => itemsSh.getRange(x.row, x.col).setValue(x.value));
+  // 反映し終えてから「どの営業日まで引いたか」を進める（途中で落ちたら翌日やり直せるように）
+  if (pos.ok) PropertiesService.getScriptProperties().setProperty('POS_CUPS_LAST_DAY', pos.through);
 
   // 不足抽出 + メール送信
   const deficits = [];
@@ -282,10 +300,10 @@ function runDailyDecrement() {
 
   const to = str(settings['ALERT_EMAIL_TO']);
   if (to) {
-    sendAlertEmail(to, deficits);
+    sendAlertEmail(to, deficits, pos.ok ? null : pos.error);
   }
 
-  return { updated: updated, shortages: deficits };
+  return { updated: updated, shortages: deficits, posCups: pos };
 }
 
 function seasonTag(date) {
@@ -302,7 +320,7 @@ function getSeasonFactor(tag, settings) {
 }
 
 // ===== 通知メール =====
-function sendAlertEmail(to, deficits) {
+function sendAlertEmail(to, deficits, posError) {
   const now = new Date();
   const yyyy = now.getFullYear();
   const mm = ('0' + (now.getMonth() + 1)).slice(-2);
@@ -314,6 +332,10 @@ function sendAlertEmail(to, deficits) {
 
   const lines = [];
   lines.push(`【在庫アラート】${dateStr}`);
+  if (posError) {
+    lines.push(`⚠ POSの実売が取れなかったため、カップは今日は減らしていません（明日まとめて引きます）: ${posError}`);
+    lines.push('');
+  }
   lines.push('下限を下回った品目です:');
   deficits.forEach(d => {
     lines.push(`・${d.name} 現在${round2(d.current)}${d.unit} / 下限${round2(d.min)}${d.unit}`);
@@ -586,4 +608,55 @@ function refreshAskulRates() {
 
   // 不明が多いときは届け先の書式が変わった可能性がある（マルシェ分の取りこぼし）
   return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days), skippedHonten: skipped['本店'], skippedUnknown: skipped['不明'] };
+}
+
+
+// ===== カップはPOSの実売で減らす（マルシェ） =====
+// 田川さん 2026-10-04: フロヨのS・Mは全部ロゴカップ、ダブル(W)は大きいカップを使う。
+// → Items の「POS連動」列に「S・M」か「W」を入れた品目は、基本日次量ではなく
+//    前日までのマルシェのPOS実売の個数で減らす（列が無ければ商品名 Sカップ/ロゴカップ/Wカップ で判定）。
+// 実売は woodberrys-ec の在庫API（?store=marche）の actuals から取る。S・M=sCups、W=wCups。
+// 引いた営業日はスクリプトプロパティ POS_CUPS_LAST_DAY に記録し、
+// トリガーが止まった日があっても次の実行でその分までまとめて引く（直近35日まで）。
+function posLinkOf(cell, name) {
+  const v = str(cell).normalize('NFKC').toUpperCase().replace(/\s/g, '');
+  if (v) {
+    if (v === 'W' || v.indexOf('ダブル') >= 0) return 'W';
+    if (v.indexOf('S') >= 0 || v.indexOf('M') >= 0) return 'SM';
+    return null; // 「なし」等
+  }
+  const n = str(name).normalize('NFKC').replace(/\s/g, '');
+  if (n === 'Sカップ' || n === 'ロゴカップ') return 'SM';
+  if (n === 'Wカップ') return 'W';
+  return null;
+}
+
+function jstDay(date) {
+  return Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy-MM-dd');
+}
+
+function loadPosCupUsage() {
+  const today = jstDay(new Date());
+  const yesterday = jstDay(new Date(Date.now() - 86400000));
+  // 初回は前日分だけ引く（過去の分は棚卸し済みの在庫に含まれている前提）
+  const last = prop('POS_CUPS_LAST_DAY') || jstDay(new Date(Date.now() - 2 * 86400000));
+  const url = prop('ORDERING_API_URL');
+  const token = prop('ORDERING_API_TOKEN');
+  if (!url || !token) return { ok: false, error: 'ORDERING_API_URL / ORDERING_API_TOKEN 未設定' };
+  try {
+    const res = UrlFetchApp.fetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'store=marche', {
+      headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) return { ok: false, error: 'EC ' + res.getResponseCode() };
+    const actuals = JSON.parse(res.getContentText()).actuals;
+    // 店で絞れていない（2店計の）実売で引くと倍速で減るので使わない
+    if (!actuals || actuals.store !== 'marche') return { ok: false, error: '実売データなし（店舗絞り込み未対応のAPI）' };
+    const days = Object.keys(actuals.days || {}).filter(d => d > last && d < today).sort();
+    let sCups = 0, wCups = 0;
+    days.forEach(d => { sCups += num(actuals.days[d].sCups); wCups += num(actuals.days[d].wCups); });
+    const label = days.length === 0 ? '営業なし' : days.length === 1 ? days[0].slice(5).replace('-', '/') : days[0].slice(5).replace('-', '/') + '〜' + days[days.length - 1].slice(5).replace('-', '/');
+    return { ok: true, sCups: sCups, wCups: wCups, days: days, through: yesterday > last ? yesterday : last, label: label };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }
