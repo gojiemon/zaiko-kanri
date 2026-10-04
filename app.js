@@ -218,7 +218,9 @@
         }
       } catch (_) {}
     }
-    return { id, name, unit, cur, min, category, soloel };
+    const askulDaily = Number(firstField(it, ['アスクル日次量'])) || 0;
+    const baseDaily = Number(firstField(it, ['基本日次量'])) || 0;
+    return { id, name, unit, cur, min, category, soloel, askulDaily, baseDaily };
   }
 
   // リンク決定（URL未設定時は検索）
@@ -509,6 +511,9 @@
     <small class="item-meta">${escapeHtml(f.category)}</small>
   </div>
   <div class="item-stock">在庫 <strong>${fmt2(cur)}</strong>${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}${isChanged ? ` <span class="pending-value">→ ${fmt2(displayValue)}</span>` : ''}</div>
+  <small class="item-meta">${f.askulDaily > 0
+    ? `減り方: アスクル実績 1日${f.askulDaily}${escapeHtml(unit)}`
+    : (f.baseDaily > 0 ? `減り方: 基本量 1日${f.baseDaily}${escapeHtml(unit)}×季節・土日` : '')}</small>
   ${restockBtn}
   <div class="controls">
     <div class="stepper">

@@ -211,7 +211,8 @@ function runDailyDecrement() {
   const colBase = pickIndex(idx, ['基本日次量', '基本日次釁E']);
   const colUnit = pickIndex(idx, ['単位', '単佁E']);
   const colMin = pickIndex(idx, ['最低在庫数']);
-  const colSkipSummer = pickIndex(idx, ['夏の自動減算オフ', '夏�E自動減算オチE']);
+  const colSkipSummer = pickIndex(idx, ['夏は自動減算オフ', '夏の自動減算オフ', '夏�E自動減算オチE']);
+  const colAskul = pickIndex(idx, ['アスクル日次量']);
 
   if ([colId, colName, colCur, colBase].some(v => v == null)) {
     throw new Error('必要な列が不足しています（ID/商品名/現在庫数/基本日次量）');
@@ -241,14 +242,17 @@ function runDailyDecrement() {
       continue; // 夏の自動減算オフ
     }
 
-    const dec = base * seasonFactor * weekendFactor;
+    // アスクルの発注実績から出した1日あたり（refreshAskulRates が週1で更新）があればそちらを使う。
+    // 1年の平均なので季節・土日の係数は掛けない（掛けると平均より多く減る）
+    const askulDaily = colAskul != null ? num(row[colAskul]) : 0;
+    const dec = askulDaily > 0 ? askulDaily : base * seasonFactor * weekendFactor;
     if (dec <= 0) continue;
 
     const before = cur;
     const after = Math.max(0, round2(cur - dec));
     if (after !== before) {
       toSet.push({ row: r + 1, col: colCur + 1, value: after });
-      logChange({ name, before, delta: round2(after - before), after, kind: '自動' });
+      logChange({ name, before, delta: round2(after - before), after, kind: askulDaily > 0 ? '自動減算(アスクル実績)' : '自動減算(' + tag + ')' });
       updated++;
     }
   }
@@ -358,6 +362,14 @@ function installDaily() {
   ScriptApp.newTrigger('runDailyDecrement').timeBased().atHour(8).everyDays(1).create();
 }
 
+// アスクル実績の週1更新（月曜7時）。初回は手動で refreshAskulRates を実行してGmailの権限を許可する
+function installAskulWeekly() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction && t.getHandlerFunction() === 'refreshAskulRates') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('refreshAskulRates').timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(7).create();
+}
+
 // ===== ヘルスチェック =====
 function ping() {
   return { time: new Date().toISOString() };
@@ -436,4 +448,124 @@ function recordFoodEvent(body) {
   const out = JSON.parse(res.getContentText() || '{}');
   if (res.getResponseCode() !== 200 || !out.ok) throw new Error('記録に失敗: ' + (out.error || res.getResponseCode()));
   return { duplicate: !!out.duplicate, at: out.at };
+}
+
+
+// ===== アスクルの発注実績から「1日あたりの減り方」を出す =====
+// 考え方: 消耗品は「買った量 ≒ 使った量」（長い目で見れば在庫は増え続けも減り続けもしない）。
+// だから直近1年の発送数量 ÷ 日数 を、その品目の実績の減り方とみなす。
+// 元データはGmailの「【アスクル】商品発送のお知らせ」（届いた＝実際に買った分。注文取消しは含まれない）。
+//
+// 手順:
+// 1. refreshAskulRates を実行 → シート「AskulHistory」に品番ごとの1年の数量が並ぶ
+// 2. AskulHistory の「在庫管理の商品名」に Items の商品名を選ぶ（同じ品目に複数の品番を紐付けてOK）
+//    「換算」に 1個（1箱）が在庫の単位でいくつか を入れる（例: エンボス手袋100枚入×在庫単位が枚 → 100）
+// 3. もう一度 refreshAskulRates → Items の「アスクル日次量」が埋まり、毎朝の自動減算がそれを使う
+const ASKUL_SHEET = 'AskulHistory';
+const ASKUL_WINDOW_DAYS = 365;
+const ASKUL_HEADERS = ['品番', '商品名（アスクル）', '期間内の数量', '発送回数', '最初の発送', '最後の発送',
+  '在庫管理の商品名', '換算（1個＝在庫いくつ）', '1日あたり（換算後）'];
+
+// 発送メール本文から [{code, name, qty}] を取り出す（「お申込番号 商品名 数量」の表。メーカー直送は「商品番号」）
+function parseAskulShipment(body) {
+  const out = [];
+  let inTable = false;
+  String(body).normalize('NFKC').split(/\r?\n/).forEach(function (raw) {
+    const line = raw.trim();
+    if (/^(お申込番号|商品番号)\s+商品名\s+数量$/.test(line)) { inTable = true; return; }
+    if (!inTable) return;
+    if (/^-{10,}$/.test(line)) return; // 表の罫線（見出しの直後と表の終わり）
+    const m = line.match(/^([0-9A-Z]{4,10})\s+(.+?)\s+(\d+)$/);
+    if (m) out.push({ code: m[1], name: m[2].replace(/\s+/g, ' '), qty: Number(m[3]) });
+    else if (line && !/^-+$/.test(line)) inTable = false; // 表の外に出た
+  });
+  return out;
+}
+
+function refreshAskulRates() {
+  const now = new Date();
+  const since = new Date(now.getTime() - ASKUL_WINDOW_DAYS * 86400000);
+  const byCode = {};
+  const seen = {};
+  let oldest = null;
+  for (let start = 0; start < 2000; start += 100) {
+    const threads = GmailApp.search('from:askul.co.jp subject:"商品発送のお知らせ" newer_than:' + ASKUL_WINDOW_DAYS + 'd', start, 100);
+    if (!threads.length) break;
+    threads.forEach(function (th) {
+      th.getMessages().forEach(function (msg) {
+        if (seen[msg.getId()]) return;
+        seen[msg.getId()] = true;
+        if (msg.getSubject().indexOf('発送') < 0) return;
+        const at = msg.getDate();
+        if (at < since) return;
+        if (!oldest || at < oldest) oldest = at;
+        parseAskulShipment(msg.getPlainBody()).forEach(function (it) {
+          const c = (byCode[it.code] = byCode[it.code] || { name: it.name, qty: 0, times: 0, first: at, last: at });
+          c.qty += it.qty;
+          c.times += 1;
+          if (at < c.first) c.first = at;
+          if (at > c.last) { c.last = at; c.name = it.name; }
+        });
+      });
+    });
+    if (threads.length < 100) break;
+  }
+  // メールが1年分そろっていない場合は、ある期間で割る（短すぎると暴れるので最低30日）
+  const days = Math.max(30, oldest ? Math.min(ASKUL_WINDOW_DAYS, (now - oldest) / 86400000) : ASKUL_WINDOW_DAYS);
+
+  // 田川さんが入れた紐付け・換算は品番をキーに引き継ぐ
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(ASKUL_SHEET) || ss.insertSheet(ASKUL_SHEET);
+  const prev = {};
+  const old = sh.getDataRange().getValues();
+  for (let r = 1; r < old.length; r++) {
+    const code = str(old[r][0]);
+    if (code) prev[code] = { item: str(old[r][6]), factor: old[r][7] };
+  }
+  Object.keys(prev).forEach(function (code) {
+    // 1年以内に発送がなくなった品番も、紐付けが入っていれば行を残す（数量0＝もう買っていない）
+    if (!byCode[code] && prev[code].item) byCode[code] = { name: str(old.find(function (r) { return str(r[0]) === code; })[1]), qty: 0, times: 0, first: null, last: null };
+  });
+
+  const rows = Object.keys(byCode).sort(function (a, b) { return byCode[b].times - byCode[a].times; }).map(function (code) {
+    const c = byCode[code];
+    const p = prev[code] || { item: '', factor: '' };
+    const factor = p.factor === '' || p.factor == null ? 1 : num(p.factor);
+    return [code, c.name, c.qty, c.times, c.first || '', c.last || '', p.item, p.factor === '' || p.factor == null ? '' : p.factor,
+      p.item ? round2(c.qty * factor / days) : ''];
+  });
+  sh.clearContents();
+  sh.getRange(1, 1, 1, ASKUL_HEADERS.length).setValues([ASKUL_HEADERS]);
+  if (rows.length) sh.getRange(2, 1, rows.length, ASKUL_HEADERS.length).setValues(rows);
+  sh.getRange(1, 1, 1, ASKUL_HEADERS.length).setFontWeight('bold');
+  sh.setFrozenRows(1);
+
+  // 「在庫管理の商品名」を Items の商品名から選べるようにする
+  const itemsSh = sheet('Items');
+  const itemValues = itemsSh.getDataRange().getValues();
+  const idx = indexer(itemValues[0]);
+  const colName = pickIndex(idx, ['商品名', '啁E��吁E']);
+  const names = itemValues.slice(1).map(function (r) { return str(r[colName]); }).filter(String);
+  if (rows.length && names.length) {
+    const rule = SpreadsheetApp.newDataValidation().requireValueInList(names, true).setAllowInvalid(true).build();
+    sh.getRange(2, 7, rows.length, 1).setDataValidation(rule);
+  }
+
+  // Items に「アスクル日次量」を書く（紐付けのない品目は空欄＝従来の基本日次量×係数のまま）
+  const perItem = {};
+  rows.forEach(function (r) {
+    if (r[6] && r[8] !== '') perItem[r[6]] = (perItem[r[6]] || 0) + Number(r[8]);
+  });
+  let colAskul = pickIndex(idx, ['アスクル日次量']);
+  if (colAskul == null) {
+    colAskul = itemValues[0].length;
+    itemsSh.getRange(1, colAskul + 1).setValue('アスクル日次量');
+  }
+  const out = itemValues.slice(1).map(function (r) {
+    const v = perItem[str(r[colName])];
+    return [v != null ? round2(v) : ''];
+  });
+  if (out.length) itemsSh.getRange(2, colAskul + 1, out.length, 1).setValues(out);
+
+  return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days) };
 }
