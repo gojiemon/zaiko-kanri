@@ -243,11 +243,15 @@ function runDailyDecrement() {
     // POSの設定（鍵）がまだ無いときは、カップ・フタも下の従来の減らし方に回す（在庫が止まらないように）
     if (posKind && posKind !== 'FIXED' && !lidNotReady && pos.configured) {
       if (!pos.ok) continue; // 基本量で減らすと、翌日の実売とで二重に引いてしまう
+      if (posKind === 'CHEESE' && !pos.hontenOk) continue; // 本店分が取れない日はマルシェ分だけで減らさない（少なく出るため）
       // ロゴカップ(Sカップ)は店頭のS・Mに加えて発送セットにも使う（田川さん 2026-10-04）
       const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids
         : posKind === 'PET' ? pos.namanoseTakeout + pos.wSpecial
         : posKind === 'NAMA_TO' ? pos.namanoseTakeout
         : posKind === 'OPP' ? pos.spoonYes
+        // 1個分あたり24g（需要予測 config/ingredients.json と同じ、発注実態から校正済み）。
+        // シートの単位「個」を何kgとするかは CREAM_CHEESE_KG_PER_UNIT（既定1kg）
+        : posKind === 'CHEESE' ? Math.round(pos.creamCheeseUnits * 24 / 1000 / (num(prop('CREAM_CHEESE_KG_PER_UNIT')) || 1) * 100) / 100
         : pos.sCups + pos.shipCups;
       if (used <= 0) continue;
       const before = num(row[colCur]);
@@ -257,6 +261,7 @@ function runDailyDecrement() {
         : posKind === 'PET' ? '生のせ持ち帰り' + pos.namanoseTakeout + '+ギリシャ/生しぼりW' + pos.wSpecial
         : posKind === 'NAMA_TO' ? '生のせ持ち帰り' + pos.namanoseTakeout
         : posKind === 'OPP' ? 'スプーンあり' + pos.spoonYes
+        : posKind === 'CHEESE' ? '2店のクリームチーズ' + Math.round(pos.creamCheeseUnits * 10) / 10 + '個分'
         : posKind === 'LID' ? '持ち帰り' + pos.takeoutCups + '+発送' + pos.shipCups
         : 'S・M' + pos.sCups + (pos.shipCups ? '+発送' + pos.shipCups : '');
       logChange({ name: row[colName], before, delta: round2(after - before), after, kind: 'POS実売(' + pos.label + ' ' + what + ')' });
@@ -797,6 +802,7 @@ function posLinkOf(cell, name) {
   if (v) {
     // 「なし」「固定」= 売上に連動させず、従来どおり 基本量×季節×土日 で減らす
     if (v === 'なし' || v === '固定' || v === 'FALSE' || v === 'OFF') return 'FIXED';
+    if (v.indexOf('チーズ') >= 0) return 'CHEESE';
     if (v.indexOf('PET') >= 0 || v.indexOf('クリスタル') >= 0) return 'PET';
     if (v.indexOf('生のせ') >= 0) return 'NAMA_TO';
     if (v.indexOf('OPP') >= 0 || v.indexOf('スプーン') >= 0) return 'OPP';
@@ -815,6 +821,8 @@ function posLinkOf(cell, name) {
   if (n === '生のせプラカップ小') return 'PET';
   if (n === '生のせプラカップ大' || n === '生のせプラフタ大') return 'NAMA_TO';
   if (n === 'OPP袋') return 'OPP';
+  // クリームチーズは本店と合わせて発注（田川さん 2026-10-05）→ 2店のPOS実売で減らす
+  if (n === 'クリームチーズ') return 'CHEESE';
   return null;
 }
 
@@ -836,7 +844,16 @@ function fetchMarcheSales() {
     // 店で絞れていない（2店計の）実売で引くと倍速で減るので使わない
     if (!body.actuals || body.actuals.store !== 'marche') return { ok: false, configured: true, error: '実売データなし（店舗絞り込み未対応のAPI）' };
     if (!body.customers || body.customers.store !== 'marche') return { ok: false, configured: true, error: '客数データなし（客数に未対応のAPI）' };
-    return { ok: true, configured: true, actuals: body.actuals, customers: body.customers.days || {} };
+    // クリームチーズは本店と合わせて発注しているので、本店の実売も取る（取れなくても他の品目は進める）
+    let honten = null;
+    try {
+      const r2 = UrlFetchApp.fetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'store=honten', {
+        headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true
+      });
+      const b2 = r2.getResponseCode() === 200 ? JSON.parse(r2.getContentText()) : null;
+      if (b2 && b2.actuals && b2.actuals.store === 'honten') honten = b2.actuals;
+    } catch (e) {}
+    return { ok: true, configured: true, actuals: body.actuals, customers: body.customers.days || {}, hontenActuals: honten };
   } catch (e) {
     return { ok: false, configured: true, error: String(e) };
   }
@@ -869,6 +886,14 @@ function loadPosCupUsage() {
     const days = Object.keys(dayset).sort();
     let customers = 0;
     days.forEach(d => { customers += num(custDays[d]); });
+    // クリームチーズ（2店分）: フレーバー「クリームチーズ」の個分（S=1・M=1.4・W各1、POSと同じ数え方）
+    const hontenDays = sales.hontenActuals ? sales.hontenActuals.days || {} : null;
+    let creamCheeseUnits = 0;
+    days.forEach(d => {
+      [actuals.days[d], hontenDays ? hontenDays[d] : null].forEach(a => {
+        if (a && a.flavorUnits) creamCheeseUnits += num(a.flavorUnits['クリームチーズ']);
+      });
+    });
     let sCups = 0, wCups = 0, takeoutCups = 0, shipCups = 0, lidReady = false, namanoseTakeout = 0, wSpecial = 0, spoonYes = 0;
     days.forEach(d => {
       const a = actuals.days[d];
@@ -887,6 +912,7 @@ function loadPosCupUsage() {
     const label = days.length === 0 ? '営業なし' : days.length === 1 ? days[0].slice(5).replace('-', '/') : days[0].slice(5).replace('-', '/') + '〜' + days[days.length - 1].slice(5).replace('-', '/');
     return { ok: true, configured: true, customers: customers, avgDailyCustomers: win.avg, customerWindow: win, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
       namanoseTakeout: namanoseTakeout, wSpecial: wSpecial, spoonYes: spoonYes,
+      creamCheeseUnits: creamCheeseUnits, hontenOk: !!hontenDays,
       lidReady: lidReady, days: days, through: yesterday > last ? yesterday : last, label: label };
   } catch (e) {
     return { ok: false, configured: true, error: String(e) };
