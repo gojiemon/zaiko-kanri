@@ -626,7 +626,10 @@ function loadSoloelOrderSheet(since) {
   const cCode = pickIndex(idx, ['お申込番号', '商品番号', '品番']);
   const cName = pickIndex(idx, ['商品名', '注文時商品名']);
   const cQty = pickIndex(idx, ['数量', '注文数量']);
-  const cDest = pickIndex(idx, ['お届け先']);
+  // お届け先は1列（整形版）か、CSVの「注文時お届け先会社名／部門名／住所１…」に分かれている。全部つなげて見る
+  const cDests = values[0].map(function (h, i) { return { h: String(h).trim(), i: i }; })
+    .filter(function (c) { return c.h === 'お届け先' || c.h.indexOf('注文時お届け先') === 0; })
+    .map(function (c) { return c.i; });
   const cOrderId = pickIndex(idx, ['オーダー管理番号']);
   if (cCode == null || cQty == null || (cDeliv == null && cOrder == null)) {
     throw new Error('「' + SOLOEL_HISTORY_SHEET + '」の見出しが足りません（お申込番号・数量・お届け日か注文日）');
@@ -651,8 +654,8 @@ function loadSoloelOrderSheet(since) {
     }
     const at = toDate(cDeliv != null && str(row[cDeliv]) ? row[cDeliv] : row[cOrder]);
     if (!at || at < since) continue;
-    if (cDest != null) {
-      const dest = str(row[cDest]).normalize('NFKC').replace(/\s/g, '');
+    if (cDests.length) {
+      const dest = cDests.map(function (i) { return str(row[i]); }).join('').normalize('NFKC').replace(/\s/g, '');
       if (dest && dest.indexOf('マルシェ') < 0 && dest.indexOf('本町1-20-14') < 0) { out.skipped++; continue; }
     }
     out.rows.push({ code: code, name: cName != null ? str(row[cName]) : '', qty: qty, at: at });
