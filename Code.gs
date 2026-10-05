@@ -580,6 +580,51 @@ function askulStoreOf(body) {
   return '不明';
 }
 
+// ソロエルアリーナ（アスクル）の注文履歴を貼ったシート「ソロエル注文履歴」を読む。
+// 田川さんがChromeのClaudeに注文履歴ページから1年分を表にしてもらい、そのまま貼る運用（2026-10-05）。
+// 見出し: 注文日 / お届け日 / オーダー管理番号 / お申込番号 / 商品名 / 数量 / お届け先
+// マルシェ宛て（お届け先に「マルシェ」か「本町1-20-14」）だけ使う。日付はお届け日、無ければ注文日。
+const SOLOEL_HISTORY_SHEET = 'ソロエル注文履歴';
+function loadSoloelOrderSheet(since) {
+  const out = { rows: [], first: null, last: null, skipped: 0 };
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SOLOEL_HISTORY_SHEET);
+  if (!sh) return out;
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return out;
+  const idx = indexer(values[0]);
+  const cDeliv = pickIndex(idx, ['お届け日']);
+  const cOrder = pickIndex(idx, ['注文日', 'ご注文日']);
+  const cCode = pickIndex(idx, ['お申込番号', '商品番号', '品番']);
+  const cName = pickIndex(idx, ['商品名']);
+  const cQty = pickIndex(idx, ['数量']);
+  const cDest = pickIndex(idx, ['お届け先']);
+  if (cCode == null || cQty == null || (cDeliv == null && cOrder == null)) {
+    throw new Error('「' + SOLOEL_HISTORY_SHEET + '」の見出しが足りません（お申込番号・数量・お届け日か注文日）');
+  }
+  function toDate(v) {
+    if (v instanceof Date) return v;
+    const m = str(v).normalize('NFKC').match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+    return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12) : null;
+  }
+  for (let r = 1; r < values.length; r++) {
+    const row = values[r];
+    const code = str(row[cCode]).normalize('NFKC');
+    const qty = num(row[cQty]);
+    if (!code || qty <= 0) continue;
+    const at = toDate(cDeliv != null && str(row[cDeliv]) ? row[cDeliv] : row[cOrder]);
+    if (!at || at < since) continue;
+    if (cDest != null) {
+      const dest = str(row[cDest]).normalize('NFKC').replace(/\s/g, '');
+      if (dest && dest.indexOf('マルシェ') < 0 && dest.indexOf('本町1-20-14') < 0) { out.skipped++; continue; }
+    }
+    out.rows.push({ code: code, name: cName != null ? str(row[cName]) : '', qty: qty, at: at });
+    if (!out.first || at < out.first) out.first = at;
+    const d = jstDay(at);
+    if (!out.last || d > out.last) out.last = d;
+  }
+  return out;
+}
+
 function refreshAskulRates() {
   const now = new Date();
   const since = new Date(now.getTime() - ASKUL_WINDOW_DAYS * 86400000);
@@ -587,6 +632,20 @@ function refreshAskulRates() {
   const seen = {};
   let oldest = null;
   const skipped = { '本店': 0, '工房': 0, '不明': 0 };
+  function addShip(code, name, qty, at) {
+    const c = (byCode[code] = byCode[code] || { name: name, qty: 0, times: 0, first: at, last: at, ships: [] });
+    c.qty += qty;
+    c.ships.push({ day: jstDay(at), qty: qty });
+    c.times += 1;
+    if (at < c.first) c.first = at;
+    if (at > c.last) { c.last = at; c.name = name; }
+  }
+  // ① ソロエルアリーナ（アスクル）の注文履歴を貼ったシート（あれば最優先。発送メールが来ない配達も入っている）
+  const hist = loadSoloelOrderSheet(since);
+  hist.rows.forEach(function (r) { addShip(r.code, r.name, r.qty, r.at); });
+  if (hist.first) oldest = hist.first;
+  skipped['本店'] += hist.skipped;
+  // ② 発送メール（シートが入っている期間は二重にならないよう読まない。それより後の分だけ使う）
   for (let start = 0; start < 2000; start += 100) {
     // 2026-05頃までは前身の「ソロエルアリーナ」(soloel.com) から同じ書式で届いている
     const threads = GmailApp.search('from:(askul.co.jp OR soloel.com) subject:"商品発送のお知らせ" newer_than:' + ASKUL_WINDOW_DAYS + 'd', start, 100);
@@ -598,18 +657,12 @@ function refreshAskulRates() {
         if (msg.getSubject().indexOf('発送') < 0) return;
         const at = msg.getDate();
         if (at < since) return;
+        if (hist.last && jstDay(at) <= hist.last) return; // 注文履歴シートでカバー済みの期間
         if (!oldest || at < oldest) oldest = at; // 期間の判定は店に関係なく（メールの残り具合を見る）
         const body = msg.getPlainBody();
         const store = askulStoreOf(body);
         if (store !== ASKUL_STORE) { skipped[store] = (skipped[store] || 0) + 1; return; }
-        parseAskulShipment(body).forEach(function (it) {
-          const c = (byCode[it.code] = byCode[it.code] || { name: it.name, qty: 0, times: 0, first: at, last: at, ships: [] });
-          c.qty += it.qty;
-          c.ships.push({ day: jstDay(at), qty: it.qty });
-          c.times += 1;
-          if (at < c.first) c.first = at;
-          if (at > c.last) { c.last = at; c.name = it.name; }
-        });
+        parseAskulShipment(body).forEach(function (it) { addShip(it.code, it.name, it.qty, at); });
       });
     });
     if (threads.length < 100) break;
