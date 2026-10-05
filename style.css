@@ -200,3 +200,27 @@ main { padding: 12px; }
 .food-form label { display: flex; flex-direction: column; font-size: 12px; gap: 2px; }
 .food-form .food-qty { width: 7em; padding: 8px; font-size: 16px; }
 .food-form select { padding: 8px; font-size: 16px; }
+
+/* 八ヶ岳 FAX発注書 */
+[hidden] { display: none !important; }
+.fax-panel { margin-bottom: 12px; border-color: #93c5fd; background: #f8fbff; }
+.fax-sum { margin: 6px 0 10px; line-height: 1.7; font-size: 14px; }
+.fax-blank { color: #b91c1c; font-weight: 700; }
+.fax-warn { color: #b45309; font-size: 13px; margin: 4px 0; }
+.fax-editor { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.fax-dates { display: flex; gap: 8px; flex-wrap: wrap; }
+.fax-dates label, .fax-memo, .fax-profile label { display: flex; flex-direction: column; font-size: 12px; gap: 2px; }
+.fax-dates input, .fax-memo textarea, .fax-profile textarea, .fax-profile input { padding: 8px; font-size: 16px; }
+.fax-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
+.fax-row-blank { border-color: #f87171; background: #fff6f6; }
+.fax-row-label { font-size: 14px; display: flex; flex-direction: column; }
+.fax-row-label small { color: #666; font-size: 12px; }
+.fax-row-qty { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.fax-row-qty input { width: 4.5em; padding: 8px; font-size: 20px; text-align: center; }
+.fax-profile { font-size: 14px; }
+.fax-profile summary { cursor: pointer; padding: 4px 0; }
+.fax-profile label { margin-top: 6px; }
+.fax-profile .btn { margin-top: 6px; margin-right: 6px; }
+.fax-actions { display: flex; gap: 6px; }
+.fax-actions .btn { flex: 1 1 0; }
+.fax-preview { width: 100%; border: 1px solid #ccc; background: #fff; }

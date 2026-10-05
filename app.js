@@ -387,6 +387,10 @@
     // 食材タブ
     document.getElementById('reloadFood')?.addEventListener('click', () => loadFood());
     document.getElementById('foodContainer')?.addEventListener('click', onFoodClick);
+    const faxPanel = document.getElementById('faxPanel');
+    faxPanel?.addEventListener('click', onFaxClick);
+    faxPanel?.addEventListener('input', onFaxInput);
+    faxPanel?.addEventListener('change', onFaxInput);
 
     // まとめて登録ボタン
     document.getElementById('saveAllBtn')?.addEventListener('click', () => {
@@ -674,6 +678,7 @@
     if (!snap) {
       if (meta) meta.textContent = '';
       wrap.innerHTML = '<p>まだ朝の計算結果が届いていません。明朝の予測LINEのあとに表示されます。</p>';
+      renderFax();
       return;
     }
     if (meta) {
@@ -684,6 +689,7 @@
     const items = [...snap.items].sort((a, b) =>
       (FOOD_STATUS[a.status]?.order ?? 9) - (FOOD_STATUS[b.status]?.order ?? 9));
     wrap.innerHTML = items.map(it => renderFoodCard(it, snap)).join('');
+    renderFax();
   }
 
   function renderFoodCard(it, snap) {
@@ -796,6 +802,388 @@
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // ===== 八ヶ岳乳業 FAX発注書 =====
+  // 朝バッチ（demand-forecast）が発注日（日・水・金）に faxSheet を送ってくる。
+  // ここで「描画 → その場で編集 → 画像保存」までやる。保存した画像を FAXアプリ（写真から選ぶ）で送る運用。
+  // 画像は端末のcanvasで作る（日本語フォントを端末に任せるため）。
+  // 守ること（田川さん確認 2026-10-05）:
+  //   - 数量0の行も空欄にせず「0」と印字する（書き忘れと区別）。空欄のままでは保存させない
+  //   - 納品指定日 = 発注日の翌日（マルシェ店納品分）。小平工場納品分は別紙なのでここでは扱わない
+  //   - 宛先・納品場所・担当名は GAS のスクリプトプロパティ FAX_PROFILE から（公開リポジトリに住所を書かない）。
+  //     アプリ側で直した場合はこの端末に保存して優先する
+  const FAX_DRAFT_KEY = 'zaiko-fax-draft';
+  const FAX_PROFILE_KEY = 'zaiko-fax-profile';
+  let faxState = null; // { base, orderDate, deliverDate, qty: [], memo, open }
+  let faxRenderTimer = null;
+
+  function lsGet(key) {
+    try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { return null; }
+  }
+  function lsSet(key, v) {
+    try { if (v == null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(v)); } catch (_) {}
+  }
+  function ymdAdd(ymd, days) {
+    const d = new Date(ymd + 'T00:00:00');
+    d.setDate(d.getDate() + days);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  function todayYmd() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  function fmtDateJa(ymd) {
+    if (!ymd) return '';
+    const d = new Date(ymd + 'T00:00:00');
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日（${DOW_JA[d.getDay()]}）`;
+  }
+
+  function faxProfile() {
+    const local = lsGet(FAX_PROFILE_KEY);
+    const remote = (foodData && foodData.faxProfile) || {};
+    const p = local || remote;
+    return {
+      to: Array.isArray(p.to) ? p.to : [],
+      shipTo: Array.isArray(p.shipTo) ? p.shipTo : [],
+      orderer: p.orderer || '',
+      local: Boolean(local),
+    };
+  }
+
+  // 今日の発注書（なければ前回の1枚を「全行手で記入」にして下敷きにする）
+  function faxBase() {
+    const snap = foodData && foodData.snapshot;
+    if (snap && snap.faxSheet) return { sheet: snap.faxSheet, fromLast: false };
+    const last = foodData && foodData.faxLast;
+    if (!last) return null;
+    const orderDate = todayYmd();
+    return {
+      fromLast: true,
+      sheet: {
+        ...last,
+        orderDate,
+        deliverDate: ymdAdd(orderDate, 1),
+        rows: last.rows.map(r => ({ ...r, qty: null, undetermined: true })),
+      },
+    };
+  }
+
+  // 下書き（編集内容）は朝の発注書ごとに端末へ保存。アプリを閉じても消えない
+  function faxDraftId(base) {
+    return `${base.fromLast ? 'last' : 'today'}:${base.sheet.orderDate}`;
+  }
+  function initFaxState() {
+    const base = faxBase();
+    if (!base) { faxState = null; return; }
+    const id = faxDraftId(base);
+    const saved = lsGet(FAX_DRAFT_KEY);
+    const open = faxState ? faxState.open : false;
+    if (saved && saved.id === id && Array.isArray(saved.qty) && saved.qty.length === base.sheet.rows.length) {
+      faxState = { base, id, orderDate: saved.orderDate, deliverDate: saved.deliverDate, qty: saved.qty, memo: saved.memo || '', open };
+    } else {
+      faxState = {
+        base, id,
+        orderDate: base.sheet.orderDate,
+        deliverDate: base.sheet.deliverDate || ymdAdd(base.sheet.orderDate, 1),
+        qty: base.sheet.rows.map(r => (r.qty == null ? '' : String(r.qty))),
+        memo: '',
+        open,
+      };
+    }
+  }
+  function saveFaxDraft() {
+    if (!faxState) return;
+    const { id, orderDate, deliverDate, qty, memo } = faxState;
+    lsSet(FAX_DRAFT_KEY, { id, orderDate, deliverDate, qty, memo });
+  }
+
+  function renderFax() {
+    const panel = document.getElementById('faxPanel');
+    if (!panel) return;
+    initFaxState();
+    if (!faxState) { panel.innerHTML = ''; panel.hidden = true; return; }
+    panel.hidden = false;
+    const { base } = faxState;
+    panel.innerHTML = `<div class="fax-head">${faxHeadHtml()}</div>
+<button class="btn ${faxState.open ? '' : 'primary'}" data-fax="toggle">${faxState.open ? '閉じる' : (base.fromLast ? '前回の発注書から作る' : '発注書を開く（編集・画像保存）')}</button>
+<div class="fax-editor" ${faxState.open ? '' : 'hidden'}>${faxState.open ? faxEditorHtml() : ''}</div>`;
+    if (faxState.open) drawFaxPreview();
+  }
+
+  // 見出しと数量の一覧（入力のたびに更新する）
+  function faxHeadHtml() {
+    const { base } = faxState;
+    const sheet = base.sheet;
+    const blanks = faxState.qty.filter(q => q === '').length;
+    const head = base.fromLast
+      ? `<p class="note">今日は発注日ではありません。急ぎのときは、前回（${escapeHtml(fmtDay(foodData.faxLast.orderDate))}）の発注書を下敷きに作れます（数量は全部手で入れます）。</p>`
+      : `<p class="fax-sum"><small>${escapeHtml(fmtDay(faxState.orderDate))}発注 → ${escapeHtml(fmtDay(faxState.deliverDate))}納品</small><br>${sheet.rows.map((r, i) => `${escapeHtml(r.label.split('／')[0])} <strong>${faxState.qty[i] === '' ? '<span class="fax-blank">手で記入</span>' : escapeHtml(faxState.qty[i]) + escapeHtml(r.unit)}</strong>`).join('<br>')}</p>`;
+    return `
+<div class="card-header">
+  <h3 class="item-title">📠 ${escapeHtml(sheet.title || 'FAX発注書')}</h3>
+  ${blanks ? `<span class="food-status food-status-warn">空欄 ${blanks}</span>` : (base.fromLast ? '' : '<span class="food-status food-status-urgent">今夜FAX</span>')}
+</div>
+${head}`;
+  }
+
+  function faxEditorHtml() {
+    const sheet = faxState.base.sheet;
+    const prof = faxProfile();
+    const rows = sheet.rows.map((r, i) => {
+      const orig = r.qty == null ? null : String(r.qty);
+      const changed = !faxState.base.fromLast && orig != null && faxState.qty[i] !== orig;
+      const tag = r.manual ? '手入力の行' : (r.undetermined ? '⚠ 自動で決められませんでした → 手で記入' : `朝の計算: ${escapeHtml(orig)}${escapeHtml(r.unit)}`);
+      return `
+<div class="fax-row ${faxState.qty[i] === '' ? 'fax-row-blank' : ''}">
+  <div class="fax-row-label">${escapeHtml(r.label)}<small>${tag}${changed ? '（変更あり）' : ''}</small></div>
+  <div class="fax-row-qty">
+    <input type="number" inputmode="numeric" min="0" step="1" data-fax-qty="${i}" value="${escapeHtml(faxState.qty[i])}" placeholder="手で記入">
+    <span>${escapeHtml(r.unit)}</span>
+  </div>
+</div>`;
+    }).join('');
+    const profMissing = !prof.to.length || !prof.shipTo.length;
+    return `
+<div class="fax-dates">
+  <label>発注日<input type="date" data-fax-field="orderDate" value="${escapeHtml(faxState.orderDate)}"></label>
+  <label>納品指定日<input type="date" data-fax-field="deliverDate" value="${escapeHtml(faxState.deliverDate)}"></label>
+</div>
+${faxState.deliverDate !== ymdAdd(faxState.orderDate, 1) ? '<p class="fax-warn">⚠ 納品指定日が発注日の翌日になっていません（マルシェ店納品は翌日）</p>' : ''}
+${rows}
+<p class="note">${escapeHtml(sheet.note || '0の行も「0」と書く')}</p>
+<label class="fax-memo">備考（任意・発注書に印字）<textarea rows="2" data-fax-field="memo">${escapeHtml(faxState.memo)}</textarea></label>
+<details class="fax-profile" ${profMissing ? 'open' : ''}>
+  <summary>宛先・納品場所・担当名${profMissing ? ' <span class="fax-blank">未設定</span>' : ''}${prof.local ? '（この端末で変更済み）' : ''}</summary>
+  <label>宛先（1行ずつ）<textarea rows="2" data-fax-prof="to">${escapeHtml(prof.to.join('\n'))}</textarea></label>
+  <label>納品場所（1行ずつ）<textarea rows="3" data-fax-prof="shipTo">${escapeHtml(prof.shipTo.join('\n'))}</textarea></label>
+  <label>発注担当名<input type="text" data-fax-prof="orderer" value="${escapeHtml(prof.orderer)}"></label>
+  <button class="btn" data-fax="profile-save">この端末に保存</button>
+  ${prof.local ? '<button class="btn" data-fax="profile-reset">設定（スプレッドシート側）に戻す</button>' : ''}
+</details>
+<div class="fax-actions">
+  <button class="btn primary" data-fax="save">画像を保存（写真へ）</button>
+  ${faxState.base.fromLast ? '' : '<button class="btn" data-fax="reset">朝の計算に戻す</button>'}
+</div>
+<p class="note">下のプレビューを長押しして「写真に保存」でも保存できます。FAX-it! では「写真」からこの画像を選んで送ってください。</p>
+<img class="fax-preview" alt="FAX発注書のプレビュー">`;
+  }
+
+  function onFaxInput(e) {
+    if (!faxState) return;
+    const t = e.target;
+    if (t.dataset.faxQty != null) {
+      faxState.qty[Number(t.dataset.faxQty)] = t.value.trim();
+      t.closest('.fax-row')?.classList.toggle('fax-row-blank', t.value.trim() === '');
+    } else if (t.dataset.faxField) {
+      const f = t.dataset.faxField;
+      faxState[f] = f === 'memo' ? t.value : t.value;
+      // 発注日を変えたら納品指定日も翌日に合わせる（リードタイムは翌日固定）
+      if (f === 'orderDate' && t.value) {
+        faxState.deliverDate = ymdAdd(t.value, 1);
+        const d = document.querySelector('[data-fax-field="deliverDate"]');
+        if (d) d.value = faxState.deliverDate;
+      }
+      if (e.type === 'change' && (f === 'orderDate' || f === 'deliverDate')) {
+        saveFaxDraft();
+        rerenderFaxEditor();
+        return;
+      }
+    } else {
+      return;
+    }
+    saveFaxDraft();
+    const head = document.querySelector('#faxPanel .fax-head');
+    if (head) head.innerHTML = faxHeadHtml();
+    clearTimeout(faxRenderTimer);
+    faxRenderTimer = setTimeout(drawFaxPreview, 250);
+  }
+
+  // 入力中のフォーカスを奪わないよう、日付など構造が変わるときだけ作り直す
+  function rerenderFaxEditor() {
+    const ed = document.querySelector('#faxPanel .fax-editor');
+    if (ed) { ed.innerHTML = faxEditorHtml(); drawFaxPreview(); }
+  }
+
+  function readProfileForm() {
+    const val = k => document.querySelector(`[data-fax-prof="${k}"]`)?.value || '';
+    const lines = v => v.split('\n').map(s => s.trim()).filter(Boolean);
+    return { to: lines(val('to')), shipTo: lines(val('shipTo')), orderer: val('orderer').trim() };
+  }
+
+  async function onFaxClick(e) {
+    const btn = e.target.closest('[data-fax]');
+    if (!btn || !faxState) return;
+    const act = btn.dataset.fax;
+    if (act === 'toggle') { faxState.open = !faxState.open; renderFax(); return; }
+    if (act === 'reset') {
+      if (!confirm('編集した数量を、朝の計算の値に戻しますか？')) return;
+      lsSet(FAX_DRAFT_KEY, null);
+      renderFax();
+      return;
+    }
+    if (act === 'profile-save') { lsSet(FAX_PROFILE_KEY, readProfileForm()); rerenderFaxEditor(); return; }
+    if (act === 'profile-reset') { lsSet(FAX_PROFILE_KEY, null); rerenderFaxEditor(); return; }
+    if (act === 'save') await saveFaxImage(btn);
+  }
+
+  // 保存前の確認。空欄（書き忘れと区別できない）と宛先未設定は止める
+  function faxProblems() {
+    const sheet = faxState.base.sheet;
+    const probs = [];
+    sheet.rows.forEach((r, i) => {
+      const q = faxState.qty[i];
+      if (q === '') probs.push(`「${r.label}」が空欄です（0なら「0」と入れてください）`);
+      else if (!/^\d+$/.test(q)) probs.push(`「${r.label}」の数量が整数ではありません: ${q}`);
+    });
+    const prof = faxProfile();
+    if (!prof.to.length) probs.push('宛先が未設定です');
+    if (!prof.shipTo.length) probs.push('納品場所が未設定です');
+    if (!sheet.faxNumber) probs.push('FAX番号が届いていません');
+    if (!faxState.orderDate || !faxState.deliverDate) probs.push('日付が空です');
+    return probs;
+  }
+
+  async function saveFaxImage(btn) {
+    const probs = faxProblems();
+    if (probs.length) { alert(`まだ保存できません:\n\n${probs.join('\n')}`); return; }
+    if (faxState.deliverDate !== ymdAdd(faxState.orderDate, 1)
+      && !confirm('納品指定日が発注日の翌日ではありません。このまま保存しますか？')) return;
+    btn.disabled = true;
+    try {
+      const canvas = drawFaxCanvas();
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+      const name = `fax-order-${faxState.orderDate}.png`;
+      const file = new File([blob], name, { type: 'image/png' });
+      // iPhone: 共有シート →「画像を保存」で写真に入る
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: name });
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return; // 共有シートを閉じただけ
+        }
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    } catch (e) {
+      alert(`画像を作れませんでした: ${e.message}`);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function drawFaxPreview() {
+    const img = document.querySelector('#faxPanel .fax-preview');
+    if (!img) return;
+    try { img.src = drawFaxCanvas().toDataURL('image/png'); } catch (_) {}
+  }
+
+  // A4縦（150dpi相当）。FAXは白黒なので色は使わず、線と文字を太めに
+  const FAX_FONT = '"Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", Meiryo, sans-serif';
+  function drawFaxCanvas() {
+    const W = 1240, H = 1754, M = 90;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const g = c.getContext('2d');
+    const sheet = faxState.base.sheet;
+    const prof = faxProfile();
+    const font = (px, bold) => `${bold ? 'bold ' : ''}${px}px ${FAX_FONT}`;
+    const text = (s, x, y, px, opt = {}) => {
+      g.font = font(px, opt.bold);
+      g.textAlign = opt.align || 'left';
+      g.textBaseline = 'alphabetic';
+      g.fillText(s, x, y);
+    };
+    // 枠に収まるよう1文字ずつ測って折り返す（日本語は単語区切りがないため）
+    const wrap = (s, maxW, px, bold) => {
+      g.font = font(px, bold);
+      const out = [];
+      let line = '';
+      for (const ch of String(s)) {
+        if (g.measureText(line + ch).width > maxW && line) { out.push(line); line = ch; } else line += ch;
+      }
+      if (line) out.push(line);
+      return out;
+    };
+
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, W, H);
+    g.fillStyle = '#000';
+    g.strokeStyle = '#000';
+
+    // 右上: 発注日・発注担当名
+    text(`発注日　${fmtDateJa(faxState.orderDate)}`, W - M, M + 20, 30, { align: 'right' });
+    text(`発注担当名　${prof.orderer}`, W - M, M + 290, 34, { bold: true, align: 'right' });
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(W - M - 360, M + 304); g.lineTo(W - M, M + 304); g.stroke();
+    // タイトル
+    text('発　注　書', W / 2, M + 120, 72, { bold: true, align: 'center' });
+
+    // 宛先（左）
+    let y = M + 220;
+    prof.to.forEach((line, i) => {
+      text(line, M, y, i === 0 ? 42 : 32, { bold: i === 0 });
+      y += i === 0 ? 56 : 46;
+    });
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(M, y - 30); g.lineTo(W / 2 + 60, y - 30); g.stroke();
+    text(`FAX　${sheet.faxNumber || ''}`, M, y + 20, 40, { bold: true });
+
+    // 納品指定日（いちばん大事なので大きく囲む）
+    y += 90;
+    g.lineWidth = 4;
+    g.strokeRect(M, y, W - M * 2, 100);
+    text('納品指定日', M + 30, y + 64, 36, { bold: true });
+    text(fmtDateJa(faxState.deliverDate), M + 300, y + 66, 48, { bold: true });
+
+    // 品目の表
+    y += 150;
+    const colQty = W - M - 360, colUnit = W - M - 130, tableW = W - M * 2;
+    const headH = 64, rowH = 120;
+    g.lineWidth = 3;
+    g.strokeRect(M, y, tableW, headH + rowH * sheet.rows.length);
+    g.fillStyle = '#e6e6e6';
+    g.fillRect(M + 2, y + 2, tableW - 4, headH - 3);
+    g.fillStyle = '#000';
+    text('品　名', (M + colQty) / 2, y + 44, 30, { bold: true, align: 'center' });
+    text('数量', (colQty + colUnit) / 2, y + 44, 30, { bold: true, align: 'center' });
+    text('単位', (colUnit + W - M) / 2, y + 44, 30, { bold: true, align: 'center' });
+    g.lineWidth = 2;
+    [colQty, colUnit].forEach(x => { g.beginPath(); g.moveTo(x, y); g.lineTo(x, y + headH + rowH * sheet.rows.length); g.stroke(); });
+    let ry = y + headH;
+    sheet.rows.forEach((r, i) => {
+      g.beginPath(); g.moveTo(M, ry); g.lineTo(W - M, ry); g.stroke();
+      const lines = wrap(r.label, colQty - M - 40, 32, false).slice(0, 2);
+      const ly = ry + rowH / 2 - (lines.length - 1) * 21 + 11;
+      lines.forEach((l, k) => text(l, M + 20, ly + k * 42, 32));
+      text(faxState.qty[i], (colQty + colUnit) / 2, ry + rowH / 2 + 26, 72, { bold: true, align: 'center' });
+      text(r.unit, (colUnit + W - M) / 2, ry + rowH / 2 + 14, 36, { align: 'center' });
+      ry += rowH;
+    });
+
+    // 納品場所
+    y = ry + 50;
+    const shipH = 40 + prof.shipTo.length * 48;
+    g.lineWidth = 3;
+    g.strokeRect(M, y, W - M * 2, shipH);
+    text('納品場所', M + 24, y + 48, 30, { bold: true });
+    prof.shipTo.forEach((line, i) => text(line, M + 220, y + 50 + i * 48, i === 0 ? 36 : 32, { bold: i === 0 }));
+
+    // 備考
+    y += shipH + 30;
+    const memoLines = faxState.memo.trim() ? faxState.memo.trim().split('\n').flatMap(l => wrap(l, W - M * 2 - 240, 30)).slice(0, 4) : []; // 1枚に収める
+    const memoH = Math.max(100, 40 + memoLines.length * 42);
+    g.strokeRect(M, y, W - M * 2, memoH);
+    text('備　考', M + 24, y + 48, 30, { bold: true });
+    memoLines.forEach((l, i) => text(l, M + 220, y + 50 + i * 42, 30));
+
+    return c;
   }
 
   // 初期化

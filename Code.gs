@@ -463,7 +463,18 @@ function saveFoodSnapshot(body) {
   const text = JSON.stringify(snap);
   // スクリプトプロパティは1値9KBまで（14品目でおよそ3KB）
   if (text.length > 9000) throw new Error('snapshot が大きすぎます: ' + text.length);
-  PropertiesService.getScriptProperties().setProperty('FOOD_SNAPSHOT', text);
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('FOOD_SNAPSHOT', text);
+  // FAX発注書は発注日（日・水・金）しか来ない。急な発注に備えて最後の1枚を残しておく
+  if (snap.faxSheet) props.setProperty('FOOD_FAX_LAST', JSON.stringify(snap.faxSheet));
+}
+
+// FAX発注書の宛先・納品場所・担当名。公開リポジトリに住所を書かないためスクリプトプロパティに置く
+//   FAX_PROFILE … {"to":["宛先1行目","2行目"],"shipTo":["納品場所1行目","2行目",...],"orderer":"担当名"}
+function readJsonProp(key) {
+  const raw = prop(key);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
 }
 
 function checkFoodPin(pin) {
@@ -489,7 +500,10 @@ function getFoodStatus() {
       eventsError = String(e);
     }
   }
-  return { snapshot: snapshot, events: events, eventsError: eventsError };
+  return {
+    snapshot: snapshot, events: events, eventsError: eventsError,
+    faxLast: readJsonProp('FOOD_FAX_LAST'), faxProfile: readJsonProp('FAX_PROFILE'),
+  };
 }
 
 function recordFoodEvent(body) {
