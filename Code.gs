@@ -783,6 +783,27 @@ function refreshAskulRates() {
   writeItemsColumn('アスクル日次量', perItem, 100);
   writeItemsColumn('1客あたり', perCustItem, 10000);
 
+  // アプリの青い「補充」ボタンを、アスクルで届く1単位（1箱・1パック…）に合わせる（田川さん 2026-10-05）。
+  // 品目に複数の品番が紐付く時は、いちばん多く発送された品番の単位を使う（rows は発送回数の多い順）
+  const restockQty = {};
+  const restockLabel = {};
+  rows.forEach(function (r) {
+    const item = r[6];
+    const factor = r[7] === '' || r[7] == null ? 1 : num(r[7]);
+    if (!item || restockQty[item] != null || !(factor > 0) || !(Number(r[3]) > 0)) return;
+    restockQty[item] = factor;
+    const m = str(r[1]).normalize('NFKC').match(/1\s*(箱|パック|セット|袋|巻|本|個|ケース|束)/);
+    restockLabel[item] = 'アスクル1' + (m ? m[1] : '個');
+  });
+  writeItemsColumn('補充単位', restockQty, 100);
+  (function () {
+    const hdr = itemsSh.getRange(1, 1, 1, itemsSh.getLastColumn()).getValues()[0];
+    let col = indexer(hdr)['補充単位名'];
+    if (col == null) { col = hdr.length; itemsSh.getRange(1, col + 1).setValue('補充単位名'); }
+    const out = itemValues.slice(1).map(function (r) { return [restockLabel[str(r[colName])] || '']; });
+    if (out.length) itemsSh.getRange(2, col + 1, out.length, 1).setValues(out);
+  })();
+
   // 不明が多いときは届け先の書式が変わった可能性がある（マルシェ分の取りこぼし）
   return { codes: rows.length, linked: Object.keys(perItem).length, days: Math.round(days), skippedHonten: skipped['本店'], skippedKobo: skipped['工房'], skippedUnknown: skipped['不明'],
     customerWindow: win, salesError: sales.ok ? null : sales.error };

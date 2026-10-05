@@ -220,6 +220,9 @@
     }
     const askulDaily = Number(firstField(it, ['アスクル日次量'])) || 0;
     const perCust = Number(firstField(it, ['1客あたり'])) || 0;
+    // アスクルで届く1単位（refreshAskulRates がシートに書く）。あれば青い補充ボタンはこの数
+    const restockUnit = Number(firstField(it, ['補充単位'])) || 0;
+    const restockUnitLabel = String(firstField(it, ['補充単位名']) || '');
     const baseDaily = Number(firstField(it, ['基本日次量'])) || 0;
     // GASの posLinkOf と同じ判定（POS連動列 → 無ければ商品名）
     const posCell = String(firstField(it, ['POS連動']) || '').normalize('NFKC').toUpperCase().replace(/\s/g, '');
@@ -237,7 +240,7 @@
         : nm === 'OPP袋' ? 'OPP'
         : ['クリームチーズ', '冷凍いちご', '冷凍マンゴー', '冷凍ラズベリー', '冷凍ブラックベリー', 'バナナ'].includes(nm) ? 'ING' : '');
     const posFixed = ['なし', '固定', 'FALSE', 'OFF'].includes(posCell);
-    return { id, name, unit, cur, min, category, soloel, askulDaily, perCust, baseDaily, posLink: posFixed ? '' : posLink, posFixed };
+    return { id, name, unit, cur, min, category, soloel, askulDaily, perCust, baseDaily, restockUnit, restockUnitLabel, posLink: posFixed ? '' : posLink, posFixed };
   }
 
   // リンク決定（URL未設定時は検索）
@@ -514,9 +517,11 @@
         linkHtml = `<span class="note">${escapeHtml(direct)}</span>`;
       }
     }
-    const restockQty = getRestockQty(name);
+    // アスクルで届く単位があればそれ（例: ＋1200個 補充（アスクル1箱））、無ければ従来の決め打ち数
+    const restockQty = f.restockUnit > 0 ? f.restockUnit : getRestockQty(name);
+    const restockNote = f.restockUnit > 0 && f.restockUnitLabel ? `（${escapeHtml(f.restockUnitLabel)}）` : '';
     const restockBtn = restockQty != null
-      ? `<button class="btn restock" data-action="restock" data-id="${id}" data-qty="${restockQty}" aria-label="${restockQty}追加">＋${restockQty}${escapeHtml(unit)} 補充</button>`
+      ? `<button class="btn restock" data-action="restock" data-id="${id}" data-qty="${restockQty}" aria-label="${restockQty}追加">＋${restockQty}${escapeHtml(unit)} 補充${restockNote}</button>`
       : '';
     // 保留中の値があればそちらを表示
     const displayValue = pendingChanges.has(String(id)) ? pendingChanges.get(String(id)) : cur;
