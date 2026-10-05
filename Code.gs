@@ -243,15 +243,16 @@ function runDailyDecrement() {
     // POSの設定（鍵）がまだ無いときは、カップ・フタも下の従来の減らし方に回す（在庫が止まらないように）
     if (posKind && posKind !== 'FIXED' && !lidNotReady && pos.configured) {
       if (!pos.ok) continue; // 基本量で減らすと、翌日の実売とで二重に引いてしまう
-      if (posKind === 'CHEESE' && !pos.hontenOk) continue; // 本店分が取れない日はマルシェ分だけで減らさない（少なく出るため）
+      const ingDef = posKind === 'ING' ? INGREDIENT_GRAMS[str(row[colName])] : null;
+      if (ingDef && ingDef.stores.indexOf('honten') >= 0 && !pos.hontenOk) continue; // 本店分が取れない日は減らさない（少なく出るため）
       // ロゴカップ(Sカップ)は店頭のS・Mに加えて発送セットにも使う（田川さん 2026-10-04）
       const used = posKind === 'W' ? pos.wCups : posKind === 'LID' ? pos.lids
         : posKind === 'PET' ? pos.namanoseTakeout + pos.wSpecial
         : posKind === 'NAMA_TO' ? pos.namanoseTakeout
         : posKind === 'OPP' ? pos.spoonYes
-        // 1個分あたり24g（需要予測 config/ingredients.json と同じ、発注実態から校正済み）。
-        // シートの単位「個」を何kgとするかは CREAM_CHEESE_KG_PER_UNIT（既定1kg）
-        : posKind === 'CHEESE' ? Math.round(pos.creamCheeseUnits * 24 / 1000 / (num(prop('CREAM_CHEESE_KG_PER_UNIT')) || 1) * 100) / 100
+        // 素材: kg。クリームチーズはシートの単位が「個」なので CREAM_CHEESE_KG_PER_UNIT（既定1kg）で割る
+        : posKind === 'ING' ? Math.round(ingredientKg(str(row[colName]), pos.marcheDays, pos.hontenDays, pos.days)
+            / (str(row[colName]) === 'クリームチーズ' ? (num(prop('CREAM_CHEESE_KG_PER_UNIT')) || 1) : 1) * 100) / 100
         : pos.sCups + pos.shipCups;
       if (used <= 0) continue;
       const before = num(row[colCur]);
@@ -261,7 +262,8 @@ function runDailyDecrement() {
         : posKind === 'PET' ? '生のせ持ち帰り' + pos.namanoseTakeout + '+ギリシャ/生しぼりW' + pos.wSpecial
         : posKind === 'NAMA_TO' ? '生のせ持ち帰り' + pos.namanoseTakeout
         : posKind === 'OPP' ? 'スプーンあり' + pos.spoonYes
-        : posKind === 'CHEESE' ? '2店のクリームチーズ' + Math.round(pos.creamCheeseUnits * 10) / 10 + '個分'
+        : posKind === 'ING' ? Object.keys(ingDef.flavors).map(function (f) { return f + ingDef.flavors[f] + 'g'; }).join('・')
+            + '×個分' + (ingDef.stores.length > 1 ? '（2店）' : '')
         : posKind === 'LID' ? '持ち帰り' + pos.takeoutCups + '+発送' + pos.shipCups
         : 'S・M' + pos.sCups + (pos.shipCups ? '+発送' + pos.shipCups : '');
       logChange({ name: row[colName], before, delta: round2(after - before), after, kind: 'POS実売(' + pos.label + ' ' + what + ')' });
@@ -797,12 +799,37 @@ function refreshAskulRates() {
 //   POSが持ち帰りを保存するのは 2026-10-04 の変更以降。記録のある日が無い間は従来の基本量で減らす。
 // 引いた営業日はスクリプトプロパティ POS_CUPS_LAST_DAY に記録し、
 // トリガーが止まった日があっても次の実行でその分までまとめて引く（直近35日まで）。
+// 素材の在庫（kg）をPOSの「フレーバー別の個分」×グラムで減らす。個分はPOSと同じ数え方（S=1・M=1.4・Wは各フレーバー1）。
+// グラムは田川さんの指定（需要予測 config/ingredients.json と同じ値。クリームチーズは 2026-10-05 に S17g・M24g・W1つ17g と確認＝1個分17g）。
+// stores: どの店の実売で減らすか（クリームチーズだけ本店と合わせて発注しているので2店）。yield: 可食部の割合（バナナは皮つきで仕入れ）
+const INGREDIENT_GRAMS = {
+  'クリームチーズ': { flavors: { 'クリームチーズ': 17 }, stores: ['marche', 'honten'] },
+  '冷凍いちご': { flavors: { '紅ほっぺ': 35 }, stores: ['marche'] },
+  '冷凍マンゴー': { flavors: { 'マンゴー': 40 }, stores: ['marche'] },
+  '冷凍ラズベリー': { flavors: { 'ラズベリー': 25, 'ミックスベリー': 10 }, stores: ['marche'] },
+  '冷凍ブラックベリー': { flavors: { 'ミックスベリー': 10 }, stores: ['marche'] },
+  'バナナ': { flavors: { 'バナナ': 20 }, stores: ['marche'], yield: 0.6 }
+};
+function ingredientKg(itemName, marcheDays, hontenDays, days) {
+  const def = INGREDIENT_GRAMS[itemName];
+  if (!def) return null;
+  let grams = 0;
+  def.stores.forEach(function (st) {
+    const src = st === 'honten' ? hontenDays : marcheDays;
+    days.forEach(function (d) {
+      const a = src && src[d];
+      if (!a || !a.flavorUnits) return;
+      Object.keys(def.flavors).forEach(function (f) { grams += num(a.flavorUnits[f]) * def.flavors[f]; });
+    });
+  });
+  return grams / 1000 / (def.yield || 1);
+}
+
 function posLinkOf(cell, name) {
   const v = str(cell).normalize('NFKC').toUpperCase().replace(/\s/g, '');
   if (v) {
     // 「なし」「固定」= 売上に連動させず、従来どおり 基本量×季節×土日 で減らす
     if (v === 'なし' || v === '固定' || v === 'FALSE' || v === 'OFF') return 'FIXED';
-    if (v.indexOf('チーズ') >= 0) return 'CHEESE';
     if (v.indexOf('PET') >= 0 || v.indexOf('クリスタル') >= 0) return 'PET';
     if (v.indexOf('生のせ') >= 0) return 'NAMA_TO';
     if (v.indexOf('OPP') >= 0 || v.indexOf('スプーン') >= 0) return 'OPP';
@@ -821,8 +848,8 @@ function posLinkOf(cell, name) {
   if (n === '生のせプラカップ小') return 'PET';
   if (n === '生のせプラカップ大' || n === '生のせプラフタ大') return 'NAMA_TO';
   if (n === 'OPP袋') return 'OPP';
-  // クリームチーズは本店と合わせて発注（田川さん 2026-10-05）→ 2店のPOS実売で減らす
-  if (n === 'クリームチーズ') return 'CHEESE';
+  // 素材（クリームチーズ・果物）は フレーバー別の個分×グラム で減らす（INGREDIENT_GRAMS）
+  if (INGREDIENT_GRAMS[str(name)]) return 'ING';
   return null;
 }
 
@@ -913,6 +940,7 @@ function loadPosCupUsage() {
     return { ok: true, configured: true, customers: customers, avgDailyCustomers: win.avg, customerWindow: win, sCups: sCups, wCups: wCups, takeoutCups: takeoutCups, shipCups: shipCups, lids: takeoutCups + shipCups,
       namanoseTakeout: namanoseTakeout, wSpecial: wSpecial, spoonYes: spoonYes,
       creamCheeseUnits: creamCheeseUnits, hontenOk: !!hontenDays,
+      marcheDays: actuals.days || {}, hontenDays: hontenDays,
       lidReady: lidReady, days: days, through: yesterday > last ? yesterday : last, label: label };
   } catch (e) {
     return { ok: false, configured: true, error: String(e) };
