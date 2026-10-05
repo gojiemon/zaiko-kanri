@@ -650,6 +650,13 @@ function loadSoloelOrderSheet(since) {
   return out;
 }
 
+// アスクル商品名から1単位の入り数を読む（読めなければ null）
+function packCountOf(name) {
+  const t = str(name).normalize('NFKC').replace(/,/g, '');
+  const m = t.match(/1\s*(?:箱|袋|パック|セット|ケース|束)\s*[（(]\s*(\d+)\s*(?:枚|個|本|ロール|巻|袋|組)/);
+  return m ? Number(m[1]) : null;
+}
+
 function refreshAskulRates() {
   const now = new Date();
   const since = new Date(now.getTime() - ASKUL_WINDOW_DAYS * 86400000);
@@ -727,6 +734,11 @@ function refreshAskulRates() {
   const rows = Object.keys(byCode).sort(function (a, b) { return byCode[b].times - byCode[a].times; }).map(function (code) {
     const c = byCode[code];
     let p = prev[code] || { item: '', factor: '' };
+    // 換算が空欄なら商品名の入り数から推定（「1袋（50個入）」→50、「1箱（1200枚：50枚入×24袋）」→1200）
+    if (p.item && (p.factor === '' || p.factor == null)) {
+      const pc = packCountOf(c.name);
+      if (pc) p = { item: p.item, factor: pc };
+    }
     if (!p.item && ASKUL_DEFAULT_MAP[code]) {
       const d = ASKUL_DEFAULT_MAP[code];
       const hit = d.items.filter(function (n) { return itemNameSet[n.normalize('NFKC').replace(/\s/g, '')]; })[0];
