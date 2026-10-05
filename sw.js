@@ -1,5 +1,5 @@
 // 簡易オフラインキャッシュ（Cache First）
-const CACHE_NAME = 'yogu-stock-cache-v24';
+const CACHE_NAME = 'yogu-stock-cache-v25';
 const CORE_ASSETS = [
   './',
   './index.html',
