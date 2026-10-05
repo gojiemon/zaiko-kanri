@@ -599,11 +599,12 @@ function loadSoloelOrderSheet(since) {
   const values = sh.getDataRange().getValues();
   if (values.length < 2) return out;
   const idx = indexer(values[0]);
-  const cDeliv = pickIndex(idx, ['お届け日']);
-  const cOrder = pickIndex(idx, ['注文日', 'ご注文日']);
+  // 見出しは7列の整形版でも、アスクル「ご利用実績ダウンロード」のCSVそのまま（出荷日・注文時商品名・注文数量…）でも読む
+  const cDeliv = pickIndex(idx, ['お届け日', '出荷日', '納品日']);
+  const cOrder = pickIndex(idx, ['注文日', 'ご注文日', '注文完了日時', '注文日時']);
   const cCode = pickIndex(idx, ['お申込番号', '商品番号', '品番']);
-  const cName = pickIndex(idx, ['商品名']);
-  const cQty = pickIndex(idx, ['数量']);
+  const cName = pickIndex(idx, ['商品名', '注文時商品名']);
+  const cQty = pickIndex(idx, ['数量', '注文数量']);
   const cDest = pickIndex(idx, ['お届け先']);
   const cOrderId = pickIndex(idx, ['オーダー管理番号']);
   if (cCode == null || cQty == null || (cDeliv == null && cOrder == null)) {
@@ -614,11 +615,19 @@ function loadSoloelOrderSheet(since) {
     const m = str(v).normalize('NFKC').match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
     return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12) : null;
   }
+  const seenRow = {};
   for (let r = 1; r < values.length; r++) {
     const row = values[r];
     const code = str(row[cCode]).normalize('NFKC');
     const qty = num(row[cQty]);
-    if (!code || qty <= 0) continue;
+    if (!code || qty <= 0) continue; // 取消・返品（数量0やマイナス）は数えない
+    // 同じ注文を2回貼ってしまっても二重にならないように（オーダー管理番号＋お申込番号で1回だけ）
+    const orderId = cOrderId != null ? str(row[cOrderId]).normalize('NFKC') : '';
+    if (orderId) {
+      const key = orderId + '|' + code;
+      if (seenRow[key]) continue;
+      seenRow[key] = true;
+    }
     const at = toDate(cDeliv != null && str(row[cDeliv]) ? row[cDeliv] : row[cOrder]);
     if (!at || at < since) continue;
     if (cDest != null) {
