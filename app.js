@@ -225,7 +225,8 @@
     const posCell = String(firstField(it, ['POS連動']) || '').normalize('NFKC').toUpperCase().replace(/\s/g, '');
     const nm = String(name).normalize('NFKC').replace(/\s/g, '');
     const posLink = posCell
-      ? (posCell.includes('PET') || posCell.includes('クリスタル') ? 'PET'
+      ? (posCell.includes('チーズ') ? 'CHEESE'
+        : posCell.includes('PET') || posCell.includes('クリスタル') ? 'PET'
         : posCell.includes('生のせ') ? 'NAMA_TO'
         : posCell.includes('OPP') || posCell.includes('スプーン') ? 'OPP'
         : posCell.includes('フタ') || posCell.includes('蓋') ? 'LID'
@@ -234,7 +235,8 @@
         : (nm === 'Sフタ' || nm === 'S蓋') ? 'LID'
         : nm === '生のせプラカップ小' ? 'PET'
         : (nm === '生のせプラカップ大' || nm === '生のせプラフタ大') ? 'NAMA_TO'
-        : nm === 'OPP袋' ? 'OPP' : '');
+        : nm === 'OPP袋' ? 'OPP'
+        : nm === 'クリームチーズ' ? 'CHEESE' : '');
     const posFixed = ['なし', '固定', 'FALSE', 'OFF'].includes(posCell);
     return { id, name, unit, cur, min, category, soloel, askulDaily, perCust, baseDaily, posLink: posFixed ? '' : posLink, posFixed };
   }
@@ -531,6 +533,7 @@
     ? (f.posLink === 'PET' ? '減り方: POS実売（生のせ持ち帰り＋ギリシャ・生しぼり入りダブルの数）'
       : f.posLink === 'NAMA_TO' ? '減り方: POS実売（生のせ持ち帰りの数）'
       : f.posLink === 'OPP' ? '減り方: POS実売（持ち帰りスプーンありの数）'
+      : f.posLink === 'CHEESE' ? '減り方: POS実売（本店＋マルシェのクリームチーズの数）'
       : f.posLink === 'LID' ? '減り方: POS実売（マルシェの持ち帰りS・M＋発送セットの数）' : (f.posLink === 'S・M' ? '減り方: POS実売（マルシェのS・M＋発送セットの数）' : `減り方: POS実売（マルシェの${f.posLink}の数）`))
     : f.posFixed
     ? (f.baseDaily > 0 ? `減り方: 固定 1日${f.baseDaily}${escapeHtml(unit)}×季節・土日` : '')
