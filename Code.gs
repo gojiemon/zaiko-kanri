@@ -543,6 +543,11 @@ const ASKUL_DEFAULT_MAP = {
   '3615627': { items: ['生のせプラカップ 大'], factor: 50 },        // ニュープロマックス325ml 50個
   '5781654': { items: ['生のせプラ フタ大'], factor: 50 },          // ニュープロマックス口径88mm用フタ 50個
   '884837': { items: ['OPP袋'], factor: 100 },                      // はがきサイズ透明袋 100枚（シートに行を足せば紐付く）
+  '9398818': { items: ['OPP袋'], factor: 100 },                     // OPP袋（シールなし）はがき用 100枚
+  '3473568': { items: ['OPPテープ'], factor: 1 },                   // 軽梱包用OPPテープ 1巻 → 個
+  '1593772': { items: ['ジップロック'], factor: 72 },                // フリーザーバッグL 72枚 → 枚
+  '6013374': { items: ['キッチンペーパー'], factor: 2 },             // リードペーパー 2ロール → ロール
+  '514246': { items: ['ペン類'], factor: 1 },                       // ボールペン 1本
   '618705': { items: ['キッチン泡ハイター', '泡ハイター'], factor: 1 },
   '5785180': { items: ['漂白剤', 'キッチン漂白剤'], factor: 1 }
 };
@@ -582,11 +587,13 @@ function askulStoreOf(body) {
 
 // ソロエルアリーナ（アスクル）の注文履歴を貼ったシート「ソロエル注文履歴」を読む。
 // 田川さんがChromeのClaudeに注文履歴ページから1年分を表にしてもらい、そのまま貼る運用（2026-10-05）。
+// 個人アカウント（ADP…）とお店用アカウント（TAAA…）で履歴が分かれるので、両方を同じシートに貼り足す。
+// 発送メールとの重複はオーダー管理番号で除く（シートに無い注文はメールから拾う）。
 // 見出し: 注文日 / お届け日 / オーダー管理番号 / お申込番号 / 商品名 / 数量 / お届け先
 // マルシェ宛て（お届け先に「マルシェ」か「本町1-20-14」）だけ使う。日付はお届け日、無ければ注文日。
 const SOLOEL_HISTORY_SHEET = 'ソロエル注文履歴';
 function loadSoloelOrderSheet(since) {
-  const out = { rows: [], first: null, last: null, skipped: 0 };
+  const out = { rows: [], first: null, last: null, skipped: 0, orderIds: {} };
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SOLOEL_HISTORY_SHEET);
   if (!sh) return out;
   const values = sh.getDataRange().getValues();
@@ -598,6 +605,7 @@ function loadSoloelOrderSheet(since) {
   const cName = pickIndex(idx, ['商品名']);
   const cQty = pickIndex(idx, ['数量']);
   const cDest = pickIndex(idx, ['お届け先']);
+  const cOrderId = pickIndex(idx, ['オーダー管理番号']);
   if (cCode == null || cQty == null || (cDeliv == null && cOrder == null)) {
     throw new Error('「' + SOLOEL_HISTORY_SHEET + '」の見出しが足りません（お申込番号・数量・お届け日か注文日）');
   }
@@ -618,6 +626,7 @@ function loadSoloelOrderSheet(since) {
       if (dest && dest.indexOf('マルシェ') < 0 && dest.indexOf('本町1-20-14') < 0) { out.skipped++; continue; }
     }
     out.rows.push({ code: code, name: cName != null ? str(row[cName]) : '', qty: qty, at: at });
+    if (cOrderId != null && str(row[cOrderId])) out.orderIds[str(row[cOrderId]).normalize('NFKC')] = true;
     if (!out.first || at < out.first) out.first = at;
     const d = jstDay(at);
     if (!out.last || d > out.last) out.last = d;
@@ -645,7 +654,8 @@ function refreshAskulRates() {
   hist.rows.forEach(function (r) { addShip(r.code, r.name, r.qty, r.at); });
   if (hist.first) oldest = hist.first;
   skipped['本店'] += hist.skipped;
-  // ② 発送メール（シートが入っている期間は二重にならないよう読まない。それより後の分だけ使う）
+  // ② 発送メール（シートに同じオーダー管理番号がある注文は二重にならないよう読まない）。
+  //    田川さんの個人アカウントとお店用アカウントで注文が分かれているため、期間ではなく注文番号で重複を見る
   for (let start = 0; start < 2000; start += 100) {
     // 2026-05頃までは前身の「ソロエルアリーナ」(soloel.com) から同じ書式で届いている
     const threads = GmailApp.search('from:(askul.co.jp OR soloel.com) subject:"商品発送のお知らせ" newer_than:' + ASKUL_WINDOW_DAYS + 'd', start, 100);
@@ -657,9 +667,10 @@ function refreshAskulRates() {
         if (msg.getSubject().indexOf('発送') < 0) return;
         const at = msg.getDate();
         if (at < since) return;
-        if (hist.last && jstDay(at) <= hist.last) return; // 注文履歴シートでカバー済みの期間
         if (!oldest || at < oldest) oldest = at; // 期間の判定は店に関係なく（メールの残り具合を見る）
         const body = msg.getPlainBody();
+        const om = body.normalize('NFKC').match(/オーダー管理番号[:：]\s*([A-Z0-9]+)/);
+        if (om && hist.orderIds[om[1]]) return; // 注文履歴シートに入っている注文
         const store = askulStoreOf(body);
         if (store !== ASKUL_STORE) { skipped[store] = (skipped[store] || 0) + 1; return; }
         parseAskulShipment(body).forEach(function (it) { addShip(it.code, it.name, it.qty, at); });
