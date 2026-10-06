@@ -137,15 +137,19 @@ function getSettingsMap() {
 // ===== データ取得 =====
 function getItems() {
   const sh = sheet('Items');
-  const values = sh.getDataRange().getValues();
+  let values = sh.getDataRange().getValues();
   if (values.length < 2) return [];
+  values = ensureUseMonthsColumn(sh, values);
   const headers = values[0];
+  const month = new Date().getMonth() + 1;
   const result = [];
   for (let r = 1; r < values.length; r++) {
     const row = values[r];
     if (row.every(v => v === '' || v == null)) continue;
     const obj = {};
     headers.forEach((h, i) => obj[String(h).trim()] = row[i]);
+    obj[USE_MONTHS_HEADER] = useMonthsText(obj[USE_MONTHS_HEADER]);
+    obj['季節外'] = !inUseMonths(obj[USE_MONTHS_HEADER], month); // アプリが不足から外すのに使う
     result.push(obj);
   }
   return result;
@@ -154,10 +158,53 @@ function getItems() {
 function getShortages() {
   var list = getItems();
   return list.filter(function (it) {
+    if (it['季節外']) return false;
     var cur = num(it['現在庫数']);
     var min = num(it['最低在庫数']);
     return cur < min;
   });
+}
+
+// ===== 季節物（使う月） =====
+// Items の「使う月」列に「11〜3」のように書いた品目は、その月の間だけ使う季節物として扱う。
+// 季節の外では 減らさない・不足に出さない・アラートメールに載せない。空欄は通年。
+// 田川さん 2026-10-06「Hotドリンクカップ・フタは冬だけ（11月〜3月）。アイスコーヒー用ストローは年中」
+const USE_MONTHS_HEADER = '使う月';
+// 「11-3」はスプレッドシートが日付（11月3日）に変えてしまうので、初期値は「11〜3」で書く
+const USE_MONTHS_DEFAULT = { 'Hotドリンクカップ': '11〜3', 'Hotドリンクフタ': '11〜3' };
+
+// セルの値を「11〜3」の形の文字にそろえる。手で「11-3」と打って日付になった場合も月〜日として読み直す
+function useMonthsText(v) {
+  if (v instanceof Date) return (v.getMonth() + 1) + '〜' + v.getDate();
+  return str(v);
+}
+
+// 「11-3」「11〜3」「11月-3月」→ 今月が範囲内か。読めない書き方は通年扱い（止めるより出す方が安全）
+function inUseMonths(spec, month) {
+  const t = useMonthsText(spec).normalize('NFKC').replace(/月/g, '').replace(/\s/g, '');
+  if (!t) return true;
+  const m = t.match(/^(\d{1,2})[-~〜～](\d{1,2})$/);
+  if (!m) return true;
+  const from = Number(m[1]), to = Number(m[2]);
+  if (from < 1 || from > 12 || to < 1 || to > 12) return true;
+  return from <= to ? (month >= from && month <= to) : (month >= from || month <= to);
+}
+
+// 「使う月」列が無ければ足して、冬物の初期値を入れる（列を作るときの1回だけ。あとは田川さんが直した値が優先）
+function ensureUseMonthsColumn(sh, values) {
+  const headers = values[0].map(function (h) { return String(h).trim(); });
+  if (headers.indexOf(USE_MONTHS_HEADER) >= 0) return values;
+  const col = headers.length + 1;
+  const colName = headers.indexOf('商品名');
+  sh.getRange(1, col).setValue(USE_MONTHS_HEADER);
+  values[0].push(USE_MONTHS_HEADER);
+  for (let r = 1; r < values.length; r++) {
+    const name = colName >= 0 ? str(values[r][colName]).normalize('NFKC').replace(/\s/g, '') : '';
+    const def = USE_MONTHS_DEFAULT[name] || '';
+    if (def) sh.getRange(r + 1, col).setValue(def);
+    values[r].push(def);
+  }
+  return values;
 }
 
 // ===== 在庫更新・ログ =====
@@ -201,8 +248,9 @@ function logChange(rec) {
 // ===== 自動減算 =====
 function runDailyDecrement() {
   const itemsSh = sheet('Items');
-  const values = itemsSh.getDataRange().getValues();
+  let values = itemsSh.getDataRange().getValues();
   if (values.length < 2) return { updated: 0, shortages: [] };
+  values = ensureUseMonthsColumn(itemsSh, values);
   const headers = values[0];
   const idx = indexer(headers);
   const colId = pickIndex(idx, ['ID', 'Id', 'id']);
@@ -215,6 +263,7 @@ function runDailyDecrement() {
   const colAskul = pickIndex(idx, ['アスクル日次量']);
   const colPos = pickIndex(idx, ['POS連動']);
   const colPerCust = pickIndex(idx, ['1客あたり']);
+  const colMonths = pickIndex(idx, [USE_MONTHS_HEADER]);
 
   if ([colId, colName, colCur, colBase].some(v => v == null)) {
     throw new Error('必要な列が不足しています（ID/商品名/現在庫数/基本日次量）');
@@ -236,6 +285,7 @@ function runDailyDecrement() {
   for (let r = 1; r < values.length; r++) {
     const row = values[r];
     if (row.every(v => v === '' || v == null)) continue;
+    if (colMonths != null && !inUseMonths(row[colMonths], today.getMonth() + 1)) continue; // 季節物の季節外は減らさない
 
     const posKind = posLinkOf(colPos != null ? row[colPos] : '', row[colName]);
     // フタ: POSが持ち帰りを記録し始める前（その期間に記録のある日が1日も無い）は、下の「売上連動」で減らす
@@ -327,6 +377,7 @@ function runDailyDecrement() {
     for (let r = 1; r < afterValues.length; r++) {
       const row = afterValues[r];
       if (row.every(v => v === '' || v == null)) continue;
+      if (colMonths != null && !inUseMonths(row[colMonths], today.getMonth() + 1)) continue; // 季節外は不足に載せない
       const cur = num(row[colCur]);
       const min = num(row[colMin]);
       if (cur < min) {

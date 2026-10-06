@@ -238,6 +238,9 @@
     const restockUnit = Number(firstField(it, ['補充単位'])) || 0;
     const restockUnitLabel = String(firstField(it, ['補充単位名']) || '');
     const baseDaily = Number(firstField(it, ['基本日次量'])) || 0;
+    // 季節物（Itemsの「使う月」）。季節外はGASが「季節外」をつけてくる → 不足に出さない
+    const useMonths = String(firstField(it, ['使う月']) || '');
+    const offSeason = it['季節外'] === true;
     // GASの posLinkOf と同じ判定（POS連動列 → 無ければ商品名）
     const posCell = String(firstField(it, ['POS連動']) || '').normalize('NFKC').toUpperCase().replace(/\s/g, '');
     const nm = String(name).normalize('NFKC').replace(/\s/g, '');
@@ -254,7 +257,7 @@
         : nm === 'OPP袋' ? 'OPP'
         : ['クリームチーズ', '冷凍いちご', '冷凍マンゴー', '冷凍ラズベリー', '冷凍ブラックベリー', 'バナナ'].includes(nm) ? 'ING' : '');
     const posFixed = ['なし', '固定', 'FALSE', 'OFF'].includes(posCell);
-    return { id, name, unit, cur, min, category, soloel, askulDaily, perCust, baseDaily, restockUnit, restockUnitLabel, posLink: posFixed ? '' : posLink, posFixed };
+    return { id, name, unit, cur, min, category, soloel, askulDaily, perCust, baseDaily, restockUnit, restockUnitLabel, posLink: posFixed ? '' : posLink, posFixed, useMonths, offSeason };
   }
 
   // リンク決定（URL未設定時は検索）
@@ -484,7 +487,7 @@
       allItems = Array.isArray(data) ? data : [];
       shortages = allItems.filter(it => {
         const f = readFields(it);
-        return Number(f.cur) < Number(f.min);
+        return !f.offSeason && Number(f.cur) < Number(f.min);
       });
       updateBadge(shortages.length);
       renderShortages();
@@ -524,7 +527,7 @@
     const unit = f.unit || '';
     const cur = Number(f.cur) || 0;
     const min = Number(f.min) || 0;
-    const shortage = cur < min;
+    const shortage = !f.offSeason && cur < min;
     const direct = String(f.soloel || '').trim();
     let linkHtml = '';
     if (direct) {
@@ -550,6 +553,7 @@
     <h3 class="item-title">${escapeHtml(name)}</h3>
     <small class="item-meta">${escapeHtml(f.category)}</small>
   </div>
+  ${f.useMonths ? `<small class="item-meta">🗓 季節物（${escapeHtml(f.useMonths.replace(/[-~〜～]/, '〜'))}月に使う）${f.offSeason ? '・今は季節外なので減らさず、不足にも出しません' : ''}</small>` : ''}
   <div class="item-stock">在庫 <strong>${fmt2(cur)}</strong>${escapeHtml(unit)} / 下限 ${fmt2(min)}${escapeHtml(unit)}${isChanged ? ` <span class="pending-value">→ ${fmt2(displayValue)}</span>` : ''}</div>
   <small class="item-meta">${f.posLink
     ? (f.posLink === 'PET' ? '減り方: POS実売（生のせ持ち帰り＋ギリシャ・生しぼり入りダブルの数）'
