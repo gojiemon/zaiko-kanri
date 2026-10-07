@@ -222,5 +222,7 @@ main { padding: 12px; }
 .fax-profile label { margin-top: 6px; }
 .fax-profile .btn { margin-top: 6px; margin-right: 6px; }
 .fax-actions { display: flex; gap: 6px; }
+.fax-tabs { display: flex; gap: 6px; }
+.fax-tabs .btn { flex: 1 1 0; }
 .fax-actions .btn { flex: 1 1 0; }
 .fax-preview { width: 100%; border: 1px solid #ccc; background: #fff; }
