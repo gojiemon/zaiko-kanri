@@ -642,7 +642,7 @@
   }
   // 棚卸しは袋で数える（目で見て分かるので。田川さん 2026-10-07）。品目ごとの1袋のkg。
   // 記録はkgに直してから送る（在庫イベントの「袋」はロット=1箱扱いになるため、ここで換算しておく）
-  const BAG_KG = { '甘味ベース': 5 };
+  const BAG_KG = { '甘味ベース': 5, 'ヨーグルト': 10 }; // ヨーグルトは箱に入らず10kgの袋のまま置く（田川さん 2026-10-07）
   function bagKg(it) { return it.unit === 'kg' ? (BAG_KG[it.name] || 0) : 0; }
   function fmtBags(it, kg) {
     const b = bagKg(it);
