@@ -640,6 +640,15 @@
     if (v == null || !isFinite(v)) return '-';
     return it.unit === 'kg' ? `${v.toFixed(1)}kg` : `${Math.round(v)}${it.unit}`;
   }
+  // 棚卸しは袋で数える（目で見て分かるので。田川さん 2026-10-07）。品目ごとの1袋のkg。
+  // 記録はkgに直してから送る（在庫イベントの「袋」はロット=1箱扱いになるため、ここで換算しておく）
+  const BAG_KG = { '甘味ベース': 5 };
+  function bagKg(it) { return it.unit === 'kg' ? (BAG_KG[it.name] || 0) : 0; }
+  function fmtBags(it, kg) {
+    const b = bagKg(it);
+    if (!b || kg == null || !isFinite(kg)) return '';
+    return `（約${(Math.round(kg / b * 10) / 10)}袋）`;
+  }
   function fmtRec(it, rec) {
     return rec.unit ? `${rec.qty}${rec.unit}` : `${rec.qty}${it.unit}`;
   }
@@ -703,11 +712,12 @@
 
     if (it.stock != null) {
       const days = it.daysLeft != null ? ` ≒ <strong>${it.daysLeft.toFixed(1)}日分</strong>` : '';
-      lines.push(`残り 約${fmtAmount(it, it.stock)}${days}`);
+      lines.push(`残り 約${fmtAmount(it, it.stock)}${fmtBags(it, it.stock)}${days}`);
     }
     if (it.status === 'tonight' || it.status === 'ordernow') {
       const arrive = it.arriveDow != null ? `→ ${DOW_JA[it.arriveDow]}着` : '';
-      lines.push(`<span class="food-reco">推奨 ${it.lots}${escapeHtml(it.lotLabel || lotWord(it))} ${arrive}</span>`);
+      const recoBags = bagKg(it) ? `＝${Math.round(it.lots * it.lot / bagKg(it))}袋` : '';
+      lines.push(`<span class="food-reco">推奨 ${it.lots}${escapeHtml(it.lotLabel || lotWord(it))}${recoBags} ${arrive}</span>`);
     }
     if (it.status === 'early' && it.nextOrderDow != null) {
       lines.push(`次の発注日（${DOW_JA[it.nextOrderDow]}）の入荷まで持たない見込み`);
@@ -723,7 +733,7 @@
       let est = toBase(it, since.count);
       for (const r of since.receives) if (r.at > since.count.at) est += toBase(it, r);
       const d = it.avgDaily > 0 ? ` ≒ ${(est / it.avgDaily).toFixed(1)}日分` : '';
-      recNotes.push(`棚卸し ${fmtRec(it, since.count)}（${fmtWhen(since.count.at)}）→ 概算 ${fmtAmount(it, est)}${d}`);
+      recNotes.push(`棚卸し ${fmtRec(it, since.count)}（${fmtWhen(since.count.at)}）→ 概算 ${fmtAmount(it, est)}${fmtBags(it, est)}${d}`);
     }
     for (const r of since.receives) recNotes.push(`入荷 ${fmtRec(it, r)}（${fmtWhen(r.at)}）`);
     for (const r of since.orders) recNotes.push(`発注 ${fmtRec(it, r)}（${fmtWhen(r.at)}）`);
@@ -772,8 +782,9 @@
           <input class="food-qty" type="number" inputmode="decimal" min="0" step="any" value="${btn.dataset.qty || ''}">
         </label>
         <select class="food-unit">
+          ${bagKg(it) ? `<option value="__bag" ${kind === 'count' ? 'selected' : ''}>袋（1袋${bagKg(it)}kg）</option>` : ''}
           <option value="">${escapeHtml(baseLabel)}</option>
-          <option value="${escapeHtml(lw)}" ${defUnit === lw ? 'selected' : ''}>${escapeHtml(it.lotLabel || lw)}</option>
+          <option value="${escapeHtml(lw)}" ${defUnit === lw && !(bagKg(it) && kind === 'count') ? 'selected' : ''}>${escapeHtml(it.lotLabel || lw)}</option>
         </select>
         <button class="btn primary" data-submit="${kind}">記録</button>
         <button class="btn" data-cancel="1">やめる</button>`;
@@ -789,8 +800,13 @@
     const item = card.querySelector('[data-item]').dataset.item;
     const kind = btn.dataset.submit;
     const raw = card.querySelector('.food-qty').value.trim();
-    const qty = Number(raw);
-    const unit = card.querySelector('.food-unit').value || null;
+    let qty = Number(raw);
+    let unit = card.querySelector('.food-unit').value || null;
+    if (unit === '__bag') {
+      const it = foodData.snapshot.items.find(x => x.name === item);
+      qty = Math.round(qty * bagKg(it) * 100) / 100; // 袋 → kg
+      unit = null;
+    }
     if (raw === '' || !isFinite(qty) || qty < 0) { alert('数量を入れてください'); return; }
     if (kind !== 'count' && qty <= 0) { alert('入荷・発注は1以上で入れてください'); return; }
     btn.disabled = true;
