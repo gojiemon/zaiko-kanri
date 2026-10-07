@@ -938,7 +938,9 @@
       const m = foodData && (foodData.snapshot?.faxSheet || foodData.faxLast);
       faxNumber = m ? m.faxNumber || '' : '';
     }
-    const id = `${kind}:${fromLast ? 'last' : 'today'}:${kind === 'marche' ? orderDate : todayYmd()}`;
+    // マルシェ分は計算し直されたら（朝→夜の再計算）下書きを捨てて新しい数字にする
+    const computedAt = kind === 'marche' && !fromLast ? (marcheBase().sheet.computedAt || '') : '';
+    const id = `${kind}:${fromLast ? 'last' : 'today'}:${kind === 'marche' ? orderDate : todayYmd()}:${computedAt}`;
     const sheet = { kind, rows, orig, fromLast, id, orderDate, deliverDate, deliverTime: def.time, qty: orig.slice(), memo: '', faxNumber, note };
     const saved = (lsGet(FAX_DRAFT_KEY) || {})[kind];
     if (saved && saved.id === id && Array.isArray(saved.qty) && saved.qty.length === rows.length) {
@@ -979,7 +981,8 @@
     if (m && !m.fromLast) {
       const blanks = m.qty.filter(q => q === '').length;
       badge = blanks ? `<span class="food-status food-status-warn">空欄 ${blanks}</span>` : '<span class="food-status food-status-urgent">今夜FAX</span>';
-      body = `<p class="fax-sum"><small>マルシェ店 ${escapeHtml(fmtDay(m.orderDate))}発注 → ${escapeHtml(fmtDay(m.deliverDate))}納品</small><br>${m.rows.map((r, i) => `${escapeHtml(r.label.split('／')[0])} <strong>${m.qty[i] === '' ? '<span class="fax-blank">手で記入</span>' : escapeHtml(m.qty[i]) + escapeHtml(r.unit)}</strong>`).join('<br>')}</p>`;
+      const ev = foodData.snapshot.faxSheet && foodData.snapshot.faxSheet.evening ? '・🌙 閉店後の再計算' : '・朝の計算（夜に閉店後の在庫で出し直します）';
+      body = `<p class="fax-sum"><small>マルシェ店 ${escapeHtml(fmtDay(m.orderDate))}発注 → ${escapeHtml(fmtDay(m.deliverDate))}納品${ev}</small><br>${m.rows.map((r, i) => `${escapeHtml(r.label.split('／')[0])} <strong>${m.qty[i] === '' ? '<span class="fax-blank">手で記入</span>' : escapeHtml(m.qty[i]) + escapeHtml(r.unit)}</strong>`).join('<br>')}</p>`;
     } else {
       body = '<p class="note">今日はマルシェ店の発注日ではありません。急ぎのときや小平工場分は「発注書を開く」から作れます。</p>';
     }
